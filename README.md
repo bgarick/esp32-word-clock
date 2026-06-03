@@ -88,7 +88,7 @@ The panels require two filament color changes:
 2. **White** — flat backing layer; this is the light diffuser that lets LED glow through the letters while blocking bleed between them
 3. **Black** — final top layer(s) seal the back and prevent light bleed around the outside
 
-The exact layer numbers depend on your slicer settings and layer height. Preview in your slicer before printing — you're looking for the transition where the letters end, the flat diffuser layer begins, and then the solid back begins.
+The exact layer numbers depend on your slicer settings and layer height. Preview in your slicer before printing — you're looking for the transition where the letters end, the flat diffuser layer begins, and then the solid back begins.  See **clock_photos/Print_Detail.png**
 
 The base parts (`v_base`, `h_base`, `h_stand`) print in black only — no color change needed.
 
@@ -153,7 +153,7 @@ Verify every word lights up in the right position on the physical panels before 
 
 On first power-up the clock broadcasts a Wi-Fi network called **Word Clock Setup**.
 
-1. Connect your phone to **Word Clock Setup** (no password)
+1. Connect your phone to **Word Clock Setup** (no password) -- see **clock_photos/WiFi_Config.png**
 2. The setup portal opens automatically — or go to `192.168.4.1`
 3. Select your Wi-Fi network and enter password
 4. Choose your **timezone** (US only: Eastern, Central, Mountain, Pacific, Alaska, Hawaii)
@@ -194,6 +194,7 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 | Birthday | Rainbow per letter |
 | April Fools' | Random wrong time, random palette |
 
+Photos taken in June (Pride Month)
 ---
 
 ## Build Notes & Gotchas
@@ -241,8 +242,14 @@ esp32-word-clock/
 │   ├── h_base_1.stl
 │   ├── h_base_2.stl
 │   └── h_base_3.stl
-├── photos/
-│   └── clock.jpg
+├── clock_photos/
+│   └── WiFi_Config.png
+│   ├── Vertical_ON.jpg
+│   ├── Veritcal_OFF.jpg
+│   ├── Horizontal_ON.jpg
+│   ├── Horizontal_OFF.jpg
+│   ├── Vertical_Hanger-Hook.jpg
+│   └── Print_Detail.jpg
 ├── README.md
 └── LICENSE
 ```
