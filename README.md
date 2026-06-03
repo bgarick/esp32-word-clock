@@ -2,7 +2,7 @@
 
 A handmade LED word clock built on an ESP32-C3, displaying time in natural language using 144 NeoPixel LEDs. Mounts vertically or horizontally. Colors shift by season and holiday automatically.
 
-![Word Clock](photos/clock.jpg)
+![Word Clock](clock_photos/Horizontal_ON.jpg)
 
 ---
 
@@ -58,8 +58,7 @@ Each orientation has its own set of STL files.
 | `v_panel_1.stl` | Word panel 1 of 3 |
 | `v_panel_2.stl` | Word panel 2 of 3 |
 | `v_panel_3.stl` | Word panel 3 of 3 |
-| `v_base_1.stl` | Back panel 1 of 2 |
-| `v_base_2.stl` | Back panel 2 of 2 |
+| `v_base.stl` | Back panel |
 
 ### Horizontal
 | File | Description |
@@ -67,11 +66,10 @@ Each orientation has its own set of STL files.
 | `h_panel_1.stl` | Word panel 1 of 3 |
 | `h_panel_2.stl` | Word panel 2 of 3 |
 | `h_panel_3.stl` | Word panel 3 of 3 |
-| `h_base_1.stl` | Base panel 1 of 2 |
-| `h_base_2.stl` | Base panel 2 of 2 |
+| `h_base.stl` | Base panel |
 | `h_base_3.stl` | Stand |
 
-The base parts are designed as single pieces but may need to be split if they exceed your printer's build volume. Glue split pieces together before assembly. The horizontal stand (`h_base_3`) attaches to the base with a flat glue joint.
+The base parts are single-piece designs. If they exceed your printer's build volume, split them in your slicer before printing and glue the pieces together. The horizontal stand (`h_base_3`) attaches to the base with a flat glue joint.
 
 ---
 
@@ -88,12 +86,12 @@ The panels require two filament color changes:
 2. **White** — flat backing layer; this is the light diffuser that lets LED glow through the letters while blocking bleed between them
 3. **Black** — final top layer(s) seal the back and prevent light bleed around the outside
 
-The exact layer numbers depend on your slicer settings and layer height. Preview in your slicer before printing — you're looking for the transition where the letters end, the flat diffuser layer begins, and then the solid back begins.  See **clock_photos/Print_Detail.png**
+The exact layer numbers depend on your slicer settings and layer height. Preview in your slicer before printing — you're looking for the transition where the letters end, the flat diffuser layer begins, and then the solid back begins. See **clock_photos/Print_Detail.jpg**
 
-The base parts (`v_base`, `h_base`, `h_stand`) print in black only — no color change needed.
+The base parts print in black only — no color change needed.
 
 ### Glue
-Use a thick, non-runny clear adhesive (Gorilla Glue Clear works well). Runny glues will wick into the LED pockets and onto the LEDs. Glue is used for all joints: LED panels into word panel pockets, word panels to each other, word panel assembly to base, and base panels to each other.
+Use a thick, non-runny clear adhesive (Gorilla Glue Clear works well). Runny glues will wick into the LED pockets and onto the LEDs. Glue is used for all joints: LED panels into word panel pockets, word panels to each other, word panel assembly to base, and base to stand.
 
 ---
 
@@ -119,13 +117,13 @@ Verify every word lights up in the right position on the physical panels before 
 ## Assembly Order
 
 1. **Print word panels** — black/white/black color change, face down, no supports
-2. **Print base panels** — black only; split and glue if needed for your print bed
+2. **Print base panels** — black only; split in slicer if needed for your print bed
 3. **Prep LED panels** — remove mounting clips, solder panels into a chain, solder leads to ESP32-C3
 4. **Test** — flash the appropriate word test sketch, verify all words light up correctly
 5. **Seat LEDs** — press LED panels into the pockets on the back of the word panels, glue in place
 6. **Join word panels** — glue the three word panels together into a single strip
 7. **Mount ESP32-C3** — orient carefully so BOOT button and USB-C align with access points, glue in place
-8. **Attach base** — glue base panels together, then glue to the back of the word panel assembly
+8. **Attach base** — glue base to the back of the word panel assembly
 9. **Horizontal only** — glue stand (`h_base_3`) to base with flat joint
 
 ---
@@ -153,7 +151,7 @@ Verify every word lights up in the right position on the physical panels before 
 
 On first power-up the clock broadcasts a Wi-Fi network called **Word Clock Setup**.
 
-1. Connect your phone to **Word Clock Setup** (no password) -- see **clock_photos/WiFi_Config.png**
+1. Connect your phone to **Word Clock Setup** (no password) — see **clock_photos/WiFi_Config.png**
 2. The setup portal opens automatically — or go to `192.168.4.1`
 3. Select your Wi-Fi network and enter password
 4. Choose your **timezone** (US only: Eastern, Central, Mountain, Pacific, Alaska, Hawaii)
@@ -176,7 +174,9 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 
 ---
 
-## Color Palettes - 
+## Color Palettes
+
+> Note: Photos in `clock_photos/` were taken in June — colors shown are Pride Month rainbow mode.
 
 | Period / Holiday | Colors |
 |-----------------|--------|
@@ -222,6 +222,13 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 
 ---
 
+## Feedback & Questions
+
+- **Bug or build problem?** Open an [Issue](https://github.com/bgarick/esp32-word-clock/issues)
+- **Questions or build logs?** Start a [Discussion](https://github.com/bgarick/esp32-word-clock/discussions)
+
+---
+
 ## Repository Structure
 
 ```
@@ -233,22 +240,20 @@ esp32-word-clock/
 │   ├── v_panel_1.stl
 │   ├── v_panel_2.stl
 │   ├── v_panel_3.stl
-│   ├── v_base_1.stl
-│   ├── v_base_2.stl
+│   ├── v_base.stl
 │   ├── h_panel_1.stl
 │   ├── h_panel_2.stl
 │   ├── h_panel_3.stl
-│   ├── h_base_1.stl
-│   ├── h_base_2.stl
+│   ├── h_base.stl
 │   └── h_base_3.stl
 ├── clock_photos/
-│   └── WiFi_Config.png
-│   ├── Vertical_ON.jpg
-│   ├── Veritcal_OFF.jpg
 │   ├── Horizontal_ON.jpg
 │   ├── Horizontal_OFF.jpg
+│   ├── Vertical_ON.jpg
+│   ├── Vertical_OFF.jpg
 │   ├── Vertical_Hanger-Hook.jpg
-│   └── Print_Detail.jpg
+│   ├── Print_Detail.jpg
+│   └── WiFi_Config.png
 ├── README.md
 └── LICENSE
 ```
