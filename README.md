@@ -245,7 +245,7 @@ esp32-word-clock/
 │   ├── h_panel_2.stl
 │   ├── h_panel_3.stl
 │   ├── h_base.stl
-│   └── h_base_3.stl
+│   └── h_stand.stl
 ├── clock_photos/
 │   ├── Horizontal_ON.jpg
 │   ├── Horizontal_OFF.jpg
