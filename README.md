@@ -176,7 +176,7 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 
 ---
 
-## Color Palettes
+## Color Palettes - Photos taken in June (Pride Month)
 
 | Period / Holiday | Colors |
 |-----------------|--------|
@@ -194,7 +194,6 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 | Birthday | Rainbow per letter |
 | April Fools' | Random wrong time, random palette |
 
-Photos taken in June (Pride Month)
 ---
 
 ## Build Notes & Gotchas
