@@ -176,7 +176,7 @@ There's a small hole on the back near the USB-C port. Use a straightened wire to
 
 ---
 
-## Color Palettes - Photos taken in June (Pride Month)
+## Color Palettes - 
 
 | Period / Holiday | Colors |
 |-----------------|--------|
