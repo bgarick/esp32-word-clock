@@ -1,0 +1,106 @@
+name: Build & Release Word Clock firmware
+
+# Bump FW_VERSION in esp32-word-clock.ino and push to main.
+# This compiles the firmware, publishes it as a Release, and deploys the
+# ESP Web Tools install page (+ version.json the clocks read) to GitHub Pages.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'esp32-word-clock.ino'
+      - 'docs/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write     # create releases
+  pages: write        # deploy Pages
+  id-token: write     # Pages deploy
+
+concurrency:
+  group: wc-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read firmware version
+        id: ver
+        run: |
+          V=$(grep -E '^#define[[:space:]]+FW_VERSION' esp32-word-clock.ino | awk '{print $3}')
+          test -n "$V" || { echo "FW_VERSION not found"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Firmware version: $V"
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Install ESP32 core + libraries
+        run: |
+          arduino-cli config init --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "Adafruit NeoPixel" "WiFiManager" "ArduinoJson"
+
+      - name: Compile (ESP32-C3, OTA partition scheme)
+        run: |
+          mkdir -p sketch/word_clock
+          cp esp32-word-clock.ino sketch/word_clock/word_clock.ino
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32c3:CDCOnBoot=cdc,PartitionScheme=default" \
+            --output-dir build \
+            sketch/word_clock
+          ls -la build
+
+      - name: Assemble site + firmware artifacts
+        run: |
+          mkdir -p site/firmware
+          cp build/word_clock.ino.bin            site/firmware/esp32-word-clock.bin
+          cp build/word_clock.ino.bootloader.bin site/firmware/bootloader.bin
+          cp build/word_clock.ino.partitions.bin site/firmware/partitions.bin
+          BOOTAPP=$(find "$HOME/.arduino15" -name boot_app0.bin | head -1)
+          cp "$BOOTAPP" site/firmware/boot_app0.bin
+          cp -r docs/* site/
+          # version.json the clocks poll:
+          printf '{"version": %s}\n' "${{ steps.ver.outputs.version }}" > site/version.json
+          # keep the install manifest's version label in sync:
+          sed -i "s/\"version\": \"[0-9]*\"/\"version\": \"${{ steps.ver.outputs.version }}\"/" site/manifest.json
+          echo "--- version.json ---"; cat site/version.json
+          echo "--- site tree ---"; find site -type f
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Word Clock v${{ steps.ver.outputs.version }}
+          files: site/firmware/esp32-word-clock.bin
+          make_latest: true
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy-pages:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

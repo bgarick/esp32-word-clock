@@ -28,6 +28,11 @@
 #include <math.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
+#include <string.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <HTTPUpdate.h>
+#include <ArduinoJson.h>
 
 #define LED_PIN    4
 #define NUMPIXELS  144
@@ -49,12 +54,34 @@ int    r = 0, g = 0, b = 0;
 uint16_t frameLitCount = 0;
 uint8_t brightness = 15;   // fixed default; no longer user-configurable
 
+// ============================================================================
+// Fade / transition state  (added 2026-10-03: smooth staggered time changes)
+// ============================================================================
+#define FADE_OUT_MS 250     // outgoing words fade to black
+#define FADE_IN_MS  200     // each incoming group fades up
+#define FADE_STEPS  20      // interpolation steps per fade
+uint8_t live[NUMPIXELS][3]; // colors currently on the strip (final RGB)
+uint8_t tgt [NUMPIXELS][3]; // target frame built by showTime()
+uint8_t grp [NUMPIXELS];    // per-pixel group: 0=none 1=hour 2=minute 3=connector
+uint8_t g_curGroup = 0;     // group currently being painted by setLEDs()
+
 // Birthday globals
 uint8_t bdayMonth = 1;
 uint8_t bdayDay   = 25;
 
 // Layout: 0 = Vertical, 1 = Horizontal
 uint8_t layout = 0;
+
+// ============================================================================
+// OTA auto-update (added 2026-10-03)
+// Bump FW_VERSION with every release. The GitHub Action publishes version.json
+// to Pages and the firmware .bin to the latest Release; the clock updates when
+// the published version is higher than the one baked in here.
+// ============================================================================
+#define FW_VERSION 8
+const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
+const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/esp32-word-clock.bin";
+int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
 
 volatile bool WIFI_OK = false;
 volatile uint8_t WIFI_LAST_REASON = 0;
@@ -86,7 +113,7 @@ int V_twelveMin[]  = { 125,122,117,114,109,106 };
 int V_thirteen[]   = { 118,113,110,105,80,81,82,83 };
 int V_fourteen[]   = { 111,104,103,96,80,81,82,83 };
 int V_fifteen[]    = { 119,112,111,80,81,82,83 };
-int V_quarter[]    = { 101,98,93,90,85,82,77 };
+int V_quarter[]    = { 102,97,94,89,86,81,78 };   // FIX 2026-10-03: was {101,98,93,90,85,82,77} (overlapped HALF; shifted one column)
 int V_sixteen[]    = { 95,88,87,80,81,82,83 };
 int V_seventeen[]  = { 142,137,134,129,126,80,81,82,83 };
 int V_eighteen[]   = { 141,138,133,130,80,81,82,83 };
@@ -135,7 +162,7 @@ int H_twelveMin[]  = { 126,121,118,113,110,105 };
 int H_thirteen[]   = { 117,114,109,106,80,81,82,83 };
 int H_fourteen[]   = { 99,100,107,108,80,81,82,83 };
 int H_fifteen[]    = { 116,115,108,80,81,82,83 };
-int H_quarter[]    = { 102,97,94,89,86,81,78 };
+int H_quarter[]    = { 101,98,93,90,85,82,77 };   // FIX 2026-10-03: was {102,97,94,89,86,81,78} (overlapped HALF; shifted one column)
 int H_sixteen[]    = { 92,91,84,80,81,82,83 };
 int H_seventeen[]  = { 141,138,133,130,125,80,81,82,83 };
 int H_eighteen[]   = { 142,137,134,129,80,81,82,83 };
@@ -324,6 +351,8 @@ uint8_t gamma8(uint8_t v);
 void animateIndices(const int* seq, int len, uint16_t hold_ms);
 void runPortalAnimation(WiFiManager& wm);
 void applyPowerLimitAndShow();
+void transitionToTime(int h, int m);
+void checkForUpdate(const char* reason);
 
 static uint32_t wheel(uint8_t pos){
   pos = 255 - pos;
@@ -648,6 +677,11 @@ void setup() {
   WiFiManagerParameter layoutHTMLParam(layoutHtml.c_str());
   wm.addParameter(&layoutHTMLParam);
 
+  // Firmware version label (visible in the config portal)
+  String fwHtml = String("<p style='text-align:center;color:#888;margin-top:8px'>Firmware v") + FW_VERSION + "</p>";
+  WiFiManagerParameter fwLabel(fwHtml.c_str());
+  wm.addParameter(&fwLabel);
+
   // Save callback
   wm.setSaveParamsCallback([&](){
     const char* tz = tzParam.getValue();
@@ -760,9 +794,9 @@ void setup() {
 
   Serial.printf("[CLOCK] Initial display: %02d/%02d/%04d %02d:%02d\n",
     month_, day_, year_, hour_, minute_);
-  pixels.clear();
-  showTime(hour_, minute_);
-  applyPowerLimitAndShow();
+  transitionToTime(hour_, minute_);   // initial draw (fades up from black)
+
+  checkForUpdate("boot");             // OTA check on startup (reboots if it updates)
 
   Serial.println("[BOOT] Setup complete. Clock running.");
   Serial.println("========================================\n");
@@ -834,6 +868,12 @@ void loop() {
     hour_   = tm_now.tm_hour;
     minute_ = tm_now.tm_min;
 
+    // Daily OTA check at ~4am local (once per calendar day)
+    if (hour_ == 4 && tm_now.tm_yday != otaLastCheckYday) {
+      otaLastCheckYday = tm_now.tm_yday;
+      checkForUpdate("daily");
+    }
+
     int dispHour = hour_;
     int dispMin  = minute_;
     g_forcePalette = 0; g_forceRainbow = false; g_forceJuly4 = false;
@@ -864,9 +904,7 @@ void loop() {
       month_, day_, year_, hour_, minute_, dispHour, dispMin,
       g_forcePalette, (int)g_forceRainbow, (int)g_forceJuly4);
 
-    pixels.clear();
-    showTime(dispHour, dispMin);
-    applyPowerLimitAndShow();
+    transitionToTime(dispHour, dispMin);   // smooth staggered fade (replaces clear/showTime/power-limit)
 
     Serial.printf("[CLOCK] Frame done. LEDs lit: %u  Brightness: %u\n",
       frameLitCount, pixels.getBrightness());
@@ -915,6 +953,7 @@ void ensureTimeSynced() {
 // Colors
 // ============================================================================
 void setColor(int order) {
+  g_curGroup = (order==1) ? 1 : (order==2) ? 2 : (order==3) ? 3 : 0;  // tag pixels for staggered fade
   if (g_forcePalette) {
     switch (g_forcePalette) {
       case 1: switch(order){ case 1: r=240; g= 90; b=110; break; case 2: r=245; g=185; b= 60; break; case 3: r=255; g=235; b=140; break; default: r=g=b=150; } return;
@@ -1059,7 +1098,8 @@ void setLEDs(int a[], int len) {
         rr=0; gg=0; bb=gamma8(255);
       }
     }
-    pixels.setPixelColor(idx, pixels.Color(rr,gg,bb));
+    tgt[idx][0]=rr; tgt[idx][1]=gg; tgt[idx][2]=bb;   // write into target frame, not the strip
+    grp[idx]=g_curGroup;
     if (rr||gg||bb) frameLitCount++;
   }
 }
@@ -1073,6 +1113,116 @@ void applyPowerLimitAndShow() {
   else if (frameLitCount>60 && original>70) pixels.setBrightness(70);
   pixels.show();
   if (pixels.getBrightness()!=original) pixels.setBrightness(original);
+}
+
+// ============================================================================
+// Smooth staggered transition: outgoing -> black, then connector, minute, hour.
+// Unchanged words (e.g. the hour when it hasn't rolled over) are left lit.
+// ============================================================================
+static uint8_t BLACK[NUMPIXELS][3];      // stays all-zero; fade-out target
+static bool mOut[NUMPIXELS], mConn[NUMPIXELS], mMin[NUMPIXELS], mHour[NUMPIXELS];
+
+static inline void pushLive() {
+  for (int i=0;i<NUMPIXELS;i++)
+    pixels.setPixelColor(i, pixels.Color(live[i][0], live[i][1], live[i][2]));
+  pixels.show();
+}
+
+static inline bool anySet(const bool m[]) {
+  for (int i=0;i<NUMPIXELS;i++) if (m[i]) return true;
+  return false;
+}
+
+// Fade pixels flagged in mask[] from their current live color toward dst[][3].
+void fadeMasked(const bool mask[], const uint8_t dst[][3], uint16_t ms) {
+  static uint8_t startc[NUMPIXELS][3];
+  memcpy(startc, live, sizeof(startc));
+  for (int s=1; s<=FADE_STEPS; s++) {
+    float t = (float)s / FADE_STEPS;
+    for (int i=0;i<NUMPIXELS;i++) {
+      if (mask[i]) {
+        for (int k=0;k<3;k++) {
+          int a=startc[i][k], z=dst[i][k];
+          live[i][k] = (uint8_t)(a + (int)((z-a)*t + (z>=a?0.5f:-0.5f)));
+        }
+      }
+    }
+    pushLive();
+    delay(ms / FADE_STEPS);
+  }
+  for (int i=0;i<NUMPIXELS;i++) if (mask[i])
+    for (int k=0;k<3;k++) live[i][k]=dst[i][k];   // snap to exact target
+}
+
+void transitionToTime(int h, int m) {
+  memset(tgt, 0, sizeof(tgt));
+  memset(grp, 0, sizeof(grp));
+  frameLitCount = 0;
+  showTime(h, m);                         // fills tgt[], grp[], frameLitCount
+
+  for (int i=0;i<NUMPIXELS;i++) {
+    bool oldLit = live[i][0]||live[i][1]||live[i][2];
+    bool newLit = tgt[i][0]||tgt[i][1]||tgt[i][2];
+    bool same   = newLit && oldLit &&
+                  live[i][0]==tgt[i][0] && live[i][1]==tgt[i][1] && live[i][2]==tgt[i][2];
+    mOut[i]  = oldLit && !same;            // fade out (hour included only if it changed)
+    bool in  = newLit && !same;
+    mConn[i] = in && grp[i]==3;
+    mMin[i]  = in && grp[i]==2;
+    mHour[i] = in && grp[i]==1;
+    // 'same' pixels are left untouched -> they stay lit through the transition
+  }
+
+  uint8_t original = brightness;
+  if      (frameLitCount>90 && original>80) pixels.setBrightness(80);
+  else if (frameLitCount>60 && original>70) pixels.setBrightness(70);
+
+  if (anySet(mOut))  fadeMasked(mOut,  BLACK, FADE_OUT_MS);  // step 1: outgoing -> black
+  if (anySet(mConn)) fadeMasked(mConn, tgt,   FADE_IN_MS);   // step 2: connector fades in
+  if (anySet(mMin))  fadeMasked(mMin,  tgt,   FADE_IN_MS);   // step 3: minute fades in
+  if (anySet(mHour)) fadeMasked(mHour, tgt,   FADE_IN_MS);   // step 4: hour fades in (if changed)
+
+  memcpy(live, tgt, sizeof(live));
+  pushLive();
+  if (pixels.getBrightness()!=original) pixels.setBrightness(original);
+}
+
+// ============================================================================
+// OTA: read version.json; if a newer version is published, download & flash.
+// ============================================================================
+void checkForUpdate(const char* reason) {
+  if (!WIFI_OK) { Serial.println("[OTA] skip (no WiFi)"); return; }
+  Serial.printf("[OTA] Checking (%s). Running FW_VERSION=%d\n", reason, FW_VERSION);
+
+  WiFiClientSecure client;
+  client.setInsecure();                         // public repo; no cert pinning needed
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(8000);
+  if (!http.begin(client, OTA_VERSION_URL)) { Serial.println("[OTA] begin() failed"); return; }
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) { Serial.printf("[OTA] version.json HTTP %d\n", code); http.end(); return; }
+  String payload = http.getString();
+  http.end();
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) { Serial.printf("[OTA] JSON error: %s\n", err.c_str()); return; }
+  int latest = doc["version"] | -1;
+  Serial.printf("[OTA] published=%d running=%d\n", latest, FW_VERSION);
+  if (latest <= FW_VERSION) { Serial.println("[OTA] Up to date."); return; }
+
+  Serial.printf("[OTA] Updating %d -> %d\n", FW_VERSION, latest);
+  WiFiClientSecure upClient;
+  upClient.setInsecure();
+  httpUpdate.rebootOnUpdate(true);
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  t_httpUpdate_return ret = httpUpdate.update(upClient, OTA_FIRMWARE_URL);
+  if (ret == HTTP_UPDATE_FAILED)
+    Serial.printf("[OTA] FAILED (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+  else if (ret == HTTP_UPDATE_NO_UPDATES)
+    Serial.println("[OTA] No update at firmware URL.");
+  // HTTP_UPDATE_OK reboots automatically.
 }
 
 // ============================================================================
