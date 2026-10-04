@@ -65,9 +65,17 @@ uint8_t tgt [NUMPIXELS][3]; // target frame built by showTime()
 uint8_t grp [NUMPIXELS];    // per-pixel group: 0=none 1=hour 2=minute 3=connector
 uint8_t g_curGroup = 0;     // group currently being painted by setLEDs()
 
-// Birthday globals
-uint8_t bdayMonth = 1;
-uint8_t bdayDay   = 25;
+// ============================================================================
+// Special Days (1-5): each a date + mode (3 colors or rainbow) + 3 colors.
+// Day 1 replaces the old "birthday". On a matching date the clock uses the
+// day's look, overriding the seasonal/holiday palette.
+// ============================================================================
+#define SD_COLORS   0
+#define SD_RAINBOW  1
+#define NUM_SPECIAL 5
+struct SpecialDay { uint8_t month; uint8_t day; uint8_t mode; uint32_t c1, c2, c3; };
+SpecialDay special[NUM_SPECIAL];
+int g_activeSpecial = -1;   // index of today's special day, or -1
 
 // Layout: 0 = Vertical, 1 = Horizontal
 uint8_t layout = 0;
@@ -78,7 +86,7 @@ uint8_t layout = 0;
 // to Pages and the firmware .bin to the latest Release; the clock updates when
 // the published version is higher than the one baked in here.
 // ============================================================================
-#define FW_VERSION 8
+#define FW_VERSION 9
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/esp32-word-clock.bin";
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
@@ -367,13 +375,56 @@ static inline void unpack(uint32_t c, uint8_t& rr, uint8_t& gg, uint8_t& bb){
 }
 
 bool isJuly4()      { return (month_ == 7  && day_ == 4); }
-bool isBirthday()   { return (month_ == (int)bdayMonth && day_ == (int)bdayDay); }
 bool isPride()      { return (month_ == 6); }
 bool isValentine()  { return (month_ == 2  && day_ == 14); }
 bool isStPatrick()  { return (month_ == 3  && day_ == 17); }
 bool isHalloween()  { return (month_ == 10); }
 bool isChristmas()  { return (month_ == 12); }
 bool isAprilFools() { return (month_ == 4  && day_ == 1); }
+
+// ---- Special Day helpers ---------------------------------------------------
+void initSpecialDefaults() {
+  for (int i = 0; i < NUM_SPECIAL; i++) special[i] = {0, 0, SD_COLORS, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF};
+  special[0] = {1, 25, SD_RAINBOW, 0xFF0000, 0x00FF00, 0x0000FF};  // Day 1 = old birthday (rainbow)
+}
+String serializeSpecial(const SpecialDay& sd) {
+  char buf[48];
+  snprintf(buf, sizeof(buf), "%u,%u,%u,%06lX,%06lX,%06lX",
+           sd.month, sd.day, sd.mode,
+           (unsigned long)(sd.c1 & 0xFFFFFF), (unsigned long)(sd.c2 & 0xFFFFFF), (unsigned long)(sd.c3 & 0xFFFFFF));
+  return String(buf);
+}
+void parseSpecial(const String& s, SpecialDay& sd) {
+  String f[6]; int n = 0, p = 0;
+  for (int i = 0; i <= (int)s.length() && n < 6; i++) {
+    if (i == (int)s.length() || s[i] == ',') { f[n++] = s.substring(p, i); p = i + 1; }
+  }
+  if (n >= 1) sd.month = (uint8_t)f[0].toInt();
+  if (n >= 2) sd.day   = (uint8_t)f[1].toInt();
+  if (n >= 3) sd.mode  = (uint8_t)f[2].toInt();
+  if (n >= 4) sd.c1 = (uint32_t)strtoul(f[3].c_str(), nullptr, 16);
+  if (n >= 5) sd.c2 = (uint32_t)strtoul(f[4].c_str(), nullptr, 16);
+  if (n >= 6) sd.c3 = (uint32_t)strtoul(f[5].c_str(), nullptr, 16);
+  if (sd.month > 12) sd.month = 0;
+  if (sd.day < 1 || sd.day > 31) sd.day = 1;
+  if (sd.mode > 1) sd.mode = SD_COLORS;
+}
+// Call with prefs already begun (read). Migrates the old birthday into Day 1.
+void loadSpecialDays() {
+  initSpecialDefaults();
+  special[0].month = prefs.getUChar("bdayMonth", special[0].month);
+  special[0].day   = prefs.getUChar("bdayDay",   special[0].day);
+  for (int i = 0; i < NUM_SPECIAL; i++) {
+    String key = "sd" + String(i + 1);
+    String def = serializeSpecial(special[i]);
+    parseSpecial(prefs.getString(key.c_str(), def), special[i]);
+  }
+}
+int activeSpecialDay() {
+  for (int i = 0; i < NUM_SPECIAL; i++)
+    if (special[i].month >= 1 && special[i].month == month_ && special[i].day == day_) return i;
+  return -1;
+}
 
 int thanksgivingDay(int yr, int wdayNov1){
   int firstThu = ((4 - wdayNov1 + 7) % 7) + 1;
@@ -476,17 +527,14 @@ void setup() {
   Serial.println("[PREFS] Loading saved settings...");
   prefs.begin("settings", true);
   String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-  bdayMonth = prefs.getUChar("bdayMonth", 1);
-  bdayDay   = prefs.getUChar("bdayDay",  25);
   layout    = prefs.getUChar("layout",    0);
+  loadSpecialDays();
   prefs.end();
 
-  if (bdayMonth < 1 || bdayMonth > 12) bdayMonth = 1;
-  if (bdayDay   < 1 || bdayDay   > 31) bdayDay   = 1;
   if (layout > 1) layout = 0;
 
-  Serial.printf("[PREFS] TZ: %s  Birthday: %02u/%02u  Layout: %s\n",
-    storedTZ.c_str(), bdayMonth, bdayDay, layout == 0 ? "Vertical" : "Horizontal");
+  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
+    storedTZ.c_str(), special[0].month, special[0].day, layout == 0 ? "Vertical" : "Horizontal");
 
   applyLayout();
 
@@ -596,57 +644,74 @@ void setup() {
   WiFiManagerParameter tzDropdown(tz_html.c_str());
   wm.addParameter(&tzDropdown);
 
-  // Birthday
-  WiFiManagerParameter bdayMonthParam("bdayMonth", "", String(bdayMonth).c_str(), 4, "type='hidden'");
-  wm.addParameter(&bdayMonthParam);
-
-  WiFiManagerParameter bdayDayParam("bdayDay", "", String(bdayDay).c_str(), 4, "type='hidden'");
-  wm.addParameter(&bdayDayParam);
-
-  String bdayHtml;
-  bdayHtml.reserve(1200);
-  bdayHtml += F("<label>Birthday:</label><br/>");
-  bdayHtml += F("<select id='bday_month_sel' style='width:48%;padding:6px;margin-right:4%;'>");
+  // ---- Special Days (1-5) ----
   const char* monthNames[] = {
     "January","February","March","April","May","June",
     "July","August","September","October","November","December"
   };
-  for (int m = 1; m <= 12; m++) {
-    bdayHtml += "<option value='"; bdayHtml += String(m); bdayHtml += "'>";
-    bdayHtml += monthNames[m-1]; bdayHtml += "</option>";
+  // One hidden CSV field per day: "month,day,mode,RRGGBB,RRGGBB,RRGGBB"
+  String sd1def = serializeSpecial(special[0]);
+  String sd2def = serializeSpecial(special[1]);
+  String sd3def = serializeSpecial(special[2]);
+  String sd4def = serializeSpecial(special[3]);
+  String sd5def = serializeSpecial(special[4]);
+  WiFiManagerParameter sd1Param("sd1", "", sd1def.c_str(), 48, "type='hidden'"); wm.addParameter(&sd1Param);
+  WiFiManagerParameter sd2Param("sd2", "", sd2def.c_str(), 48, "type='hidden'"); wm.addParameter(&sd2Param);
+  WiFiManagerParameter sd3Param("sd3", "", sd3def.c_str(), 48, "type='hidden'"); wm.addParameter(&sd3Param);
+  WiFiManagerParameter sd4Param("sd4", "", sd4def.c_str(), 48, "type='hidden'"); wm.addParameter(&sd4Param);
+  WiFiManagerParameter sd5Param("sd5", "", sd5def.c_str(), 48, "type='hidden'"); wm.addParameter(&sd5Param);
+  WiFiManagerParameter* sdP[NUM_SPECIAL] = { &sd1Param, &sd2Param, &sd3Param, &sd4Param, &sd5Param };
+
+  String sdHtml;
+  sdHtml.reserve(8000);
+  sdHtml += F("<label>Special Days:</label><br/>"
+              "<small>Pick a date, then 3 Colors (hour / minute / connecting word) or Rainbow. "
+              "Set month to —— to turn a day off.</small><br/><br/>");
+  for (int i = 0; i < NUM_SPECIAL; i++) {
+    SpecialDay& sd = special[i];
+    sdHtml += "<div style='border:1px solid #ccc;border-radius:6px;padding:8px;margin-bottom:8px'>";
+    sdHtml += "<b>Special Day " + String(i + 1) + "</b><br/>";
+    sdHtml += "<select id='m" + String(i) + "' style='width:48%;padding:6px;margin-right:4%'>";
+    sdHtml += "<option value='0'>—— (off)</option>";
+    for (int m = 1; m <= 12; m++) sdHtml += "<option value='" + String(m) + "'>" + monthNames[m-1] + "</option>";
+    sdHtml += "</select>";
+    sdHtml += "<select id='d" + String(i) + "' style='width:48%;padding:6px'>";
+    for (int d = 1; d <= 31; d++) sdHtml += "<option value='" + String(d) + "'>" + String(d) + "</option>";
+    sdHtml += "</select><br/>";
+    sdHtml += "<select id='md" + String(i) + "' style='width:48%;padding:6px;margin-top:6px;margin-right:4%'>";
+    sdHtml += "<option value='0'>3 Colors</option><option value='1'>Rainbow</option></select>";
+    char cc[3][8];
+    snprintf(cc[0], 8, "#%06lX", (unsigned long)(sd.c1 & 0xFFFFFF));
+    snprintf(cc[1], 8, "#%06lX", (unsigned long)(sd.c2 & 0xFFFFFF));
+    snprintf(cc[2], 8, "#%06lX", (unsigned long)(sd.c3 & 0xFFFFFF));
+    sdHtml += "<span id='cw" + String(i) + "'>";
+    sdHtml += "<input type='color' id='c1_" + String(i) + "' value='" + cc[0] + "'>";
+    sdHtml += "<input type='color' id='c2_" + String(i) + "' value='" + cc[1] + "'>";
+    sdHtml += "<input type='color' id='c3_" + String(i) + "' value='" + cc[2] + "'>";
+    sdHtml += "</span></div>";
   }
-  bdayHtml += F("</select>");
-  bdayHtml += F("<select id='bday_day_sel' style='width:48%;padding:6px;'>");
-  for (int d = 1; d <= 31; d++) {
-    bdayHtml += "<option value='"; bdayHtml += String(d); bdayHtml += "'>";
-    bdayHtml += String(d); bdayHtml += "</option>";
-  }
-  bdayHtml += F("</select>");
-  bdayHtml += F(R"rawliteral(
-    <script>
-      document.addEventListener('DOMContentLoaded', function(){
-        var mSel = document.getElementById('bday_month_sel');
-        var dSel = document.getElementById('bday_day_sel');
-        var mHid = document.getElementsByName('bdayMonth')[0];
-        var dHid = document.getElementsByName('bdayDay')[0];
-        if(mSel && mHid){
-          for(var i=0;i<mSel.options.length;i++){
-            if(mSel.options[i].value===mHid.value){ mSel.selectedIndex=i; break; }
-          }
-          mSel.addEventListener('change', function(){ mHid.value=this.value; });
-        }
-        if(dSel && dHid){
-          for(var i=0;i<dSel.options.length;i++){
-            if(dSel.options[i].value===dHid.value){ dSel.selectedIndex=i; break; }
-          }
-          dSel.addEventListener('change', function(){ dHid.value=this.value; });
-        }
-      });
-    </script>
-    <br/><br/>
+  sdHtml += "<script>var SD=[";
+  for (int i = 0; i < NUM_SPECIAL; i++)
+    sdHtml += "[" + String(special[i].month) + "," + String(special[i].day) + "," + String(special[i].mode) + "],";
+  sdHtml += "];\n";
+  sdHtml += F(R"rawliteral(
+    document.addEventListener('DOMContentLoaded', function(){
+      for (var i=0;i<5;i++) (function(i){
+        var m=document.getElementById('m'+i), d=document.getElementById('d'+i), md=document.getElementById('md'+i);
+        var cw=document.getElementById('cw'+i), hid=document.getElementsByName('sd'+(i+1))[0];
+        m.value=SD[i][0]; d.value=SD[i][1]; md.value=SD[i][2];
+        function hx(id){return document.getElementById(id).value.replace('#','').toUpperCase();}
+        function tog(){ cw.style.display=(md.value==='1')?'none':'inline'; }
+        function upd(){ hid.value=m.value+','+d.value+','+md.value+','+hx('c1_'+i)+','+hx('c2_'+i)+','+hx('c3_'+i); }
+        [m,d,md].forEach(function(e){e.addEventListener('change',function(){tog();upd();});});
+        ['c1_','c2_','c3_'].forEach(function(p){document.getElementById(p+i).addEventListener('input',upd);});
+        tog(); upd();
+      })(i);
+    });
   )rawliteral");
-  WiFiManagerParameter bdayHTMLParam(bdayHtml.c_str());
-  wm.addParameter(&bdayHTMLParam);
+  sdHtml += "</script><br/>";
+  WiFiManagerParameter sdHTMLParam(sdHtml.c_str());
+  wm.addParameter(&sdHTMLParam);
 
   // Layout
   WiFiManagerParameter layoutParam("layout", "", String(layout).c_str(), 4, "type='hidden'");
@@ -686,29 +751,28 @@ void setup() {
   wm.setSaveParamsCallback([&](){
     const char* tz = tzParam.getValue();
 
-    int mTmp = atoi(bdayMonthParam.getValue());
-    int dTmp = atoi(bdayDayParam.getValue());
-    if (mTmp < 1 || mTmp > 12) mTmp = 1;
-    if (dTmp < 1 || dTmp > 31) dTmp = 1;
-
     int lTmp = atoi(layoutParam.getValue());
     if (lTmp < 0 || lTmp > 1) lTmp = 0;
 
     prefs.begin("settings", false);
     prefs.putString("tz",        tz);
-    prefs.putUChar("bdayMonth",  (uint8_t)mTmp);
-    prefs.putUChar("bdayDay",    (uint8_t)dTmp);
+    for (int i = 0; i < NUM_SPECIAL; i++) {
+      SpecialDay tmp = special[i];
+      parseSpecial(String(sdP[i]->getValue()), tmp);
+      special[i] = tmp;
+      String key = "sd" + String(i + 1);
+      prefs.putString(key.c_str(), serializeSpecial(tmp));
+    }
     prefs.putUChar("layout",     (uint8_t)lTmp);
     prefs.end();
 
-    bdayMonth = (uint8_t)mTmp;
-    bdayDay   = (uint8_t)dTmp;
     layout    = (uint8_t)lTmp;
     applyLayout();
 
     Serial.println("[PORTAL] Settings saved:");
     Serial.printf("[PORTAL]   TZ      : %s\n", tz);
-    Serial.printf("[PORTAL]   Birthday: %02d/%02d\n", mTmp, dTmp);
+    for (int i = 0; i < NUM_SPECIAL; i++)
+      Serial.printf("[PORTAL]   SpecialDay %d: %02u/%02u mode=%u\n", i+1, special[i].month, special[i].day, special[i].mode);
     Serial.printf("[PORTAL]   Layout  : %s\n", layout == 0 ? "Vertical" : "Horizontal");
   });
 
@@ -766,19 +830,16 @@ void setup() {
   Serial.println("[PREFS] Reloading settings post-connect...");
   prefs.begin("settings", true);
   String timezone = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-  bdayMonth = prefs.getUChar("bdayMonth", bdayMonth);
-  bdayDay   = prefs.getUChar("bdayDay",   bdayDay);
   layout    = prefs.getUChar("layout",    layout);
+  loadSpecialDays();
   prefs.end();
 
-  if (bdayMonth < 1 || bdayMonth > 12) bdayMonth = 1;
-  if (bdayDay   < 1 || bdayDay   > 31) bdayDay   = 1;
   if (layout > 1) layout = 0;
 
   applyLayout();
 
-  Serial.printf("[PREFS] TZ: %s  Birthday: %02u/%02u  Layout: %s  Brightness: %u (fixed)\n",
-    timezone.c_str(), bdayMonth, bdayDay,
+  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s  Brightness: %u (fixed)\n",
+    timezone.c_str(), special[0].month, special[0].day,
     layout == 0 ? "Vertical" : "Horizontal", brightness);
 
   applyTimezone(timezone.c_str());
@@ -839,16 +900,13 @@ void loop() {
         Serial.println("[BTN] Portal saved new settings.");
         prefs.begin("settings", true);
         String timezone = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-        bdayMonth = prefs.getUChar("bdayMonth", bdayMonth);
-        bdayDay   = prefs.getUChar("bdayDay",   bdayDay);
         layout    = prefs.getUChar("layout",    layout);
+        loadSpecialDays();
         prefs.end();
-        if (bdayMonth < 1 || bdayMonth > 12) bdayMonth = 1;
-        if (bdayDay   < 1 || bdayDay   > 31) bdayDay   = 1;
         if (layout > 1) layout = 0;
         applyLayout();
-        Serial.printf("[BTN] Applied TZ: %s  Birthday: %02u/%02u  Layout: %s\n",
-          timezone.c_str(), bdayMonth, bdayDay,
+        Serial.printf("[BTN] Applied TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
+          timezone.c_str(), special[0].month, special[0].day,
           layout == 0 ? "Vertical" : "Horizontal");
         applyTimezone(timezone.c_str());
         ensureTimeSynced();
@@ -967,6 +1025,14 @@ void setColor(int order) {
       case 9: switch(order){ case 1: r=200; g= 30; b= 30; break; case 2: r= 20; g=120; b= 60; break; case 3: r=255; g=230; b=120; break; default: r=g=b=150; } return;
     }
   }
+  // Special day (highest priority after the April-Fools gag), 3-color mode
+  if (g_activeSpecial >= 0 && special[g_activeSpecial].mode == SD_COLORS) {
+    uint32_t c = (order == 1) ? special[g_activeSpecial].c1
+               : (order == 2) ? special[g_activeSpecial].c2
+               : (order == 3) ? special[g_activeSpecial].c3 : 0x969696;
+    uint8_t rr, gg, bb; unpack(c, rr, gg, bb);
+    r = rr; g = gg; b = bb; return;
+  }
   if (isValentine())   { switch(order){ case 1: r=220; g= 40; b= 80; break; case 2: r=255; g=160; b=200; break; case 3: r=255; g=240; b=245; break; default: r=g=b=150; } return; }
   if (isStPatrick())   { switch(order){ case 1: r= 20; g=120; b= 60; break; case 2: r= 80; g=170; b= 90; break; case 3: r=230; g=170; b= 40; break; default: r=g=b=150; } return; }
   if (isHalloween())   { switch(order){ case 1: r=255; g=120; b=  0; break; case 2: r=110; g= 60; b=150; break; case 3: r= 80; g= 80; b= 80; break; default: r=g=b=150; } return; }
@@ -989,6 +1055,7 @@ void setColor(int order) {
 // ============================================================================
 void showTime(int hour, int minute) {
   frameLitCount = 0;
+  g_activeSpecial = activeSpecialDay();
 
   setColor(2);
   switch (minute) {
@@ -1069,8 +1136,10 @@ uint8_t gamma8(uint8_t v){
 }
 
 void setLEDs(int a[], int len) {
-  const bool july4   = g_forceJuly4   || isJuly4();
-  const bool rainbow = g_forceRainbow || isPride() || isBirthday();
+  const bool sActive  = (g_activeSpecial >= 0);
+  const bool sRainbow = sActive && special[g_activeSpecial].mode == SD_RAINBOW;
+  const bool july4   = g_forceJuly4   || (!sActive && isJuly4());
+  const bool rainbow = g_forceRainbow || sRainbow || (!sActive && isPride());
   uint8_t baseR=gamma8(r), baseG=gamma8(g), baseB=gamma8(b);
 
   for (int i=0; i<len; i++) {

@@ -11,6 +11,8 @@ on:
       - 'esp32-word-clock.ino'
       - 'docs/**'
       - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -75,6 +77,7 @@ jobs:
           echo "--- site tree ---"; find site -type f
 
       - name: Create / update GitHub Release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
@@ -83,17 +86,20 @@ jobs:
           make_latest: true
 
       - name: Configure Pages
+        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy-pages:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pages: write
