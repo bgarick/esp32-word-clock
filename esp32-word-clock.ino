@@ -58,7 +58,7 @@ uint8_t brightness = 15;   // fixed default; no longer user-configurable
 // Fade / transition state  (added 2026-10-03: smooth staggered time changes)
 // ============================================================================
 #define FADE_OUT_MS 250     // outgoing words fade to black
-#define FADE_IN_MS  200     // each incoming group fades up
+#define FADE_IN_MS  320     // each incoming group fades up (slower = gentler)
 #define FADE_STEPS  20      // interpolation steps per fade
 uint8_t live[NUMPIXELS][3]; // colors currently on the strip (final RGB)
 uint8_t tgt [NUMPIXELS][3]; // target frame built by showTime()
@@ -86,7 +86,7 @@ uint8_t layout = 0;
 // to Pages and the firmware .bin to the latest Release; the clock updates when
 // the published version is higher than the one baked in here.
 // ============================================================================
-#define FW_VERSION 9
+#define FW_VERSION 10
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/esp32-word-clock.bin";
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
@@ -684,11 +684,12 @@ void setup() {
     snprintf(cc[0], 8, "#%06lX", (unsigned long)(sd.c1 & 0xFFFFFF));
     snprintf(cc[1], 8, "#%06lX", (unsigned long)(sd.c2 & 0xFFFFFF));
     snprintf(cc[2], 8, "#%06lX", (unsigned long)(sd.c3 & 0xFFFFFF));
-    sdHtml += "<span id='cw" + String(i) + "'>";
-    sdHtml += "<input type='color' id='c1_" + String(i) + "' value='" + cc[0] + "'>";
-    sdHtml += "<input type='color' id='c2_" + String(i) + "' value='" + cc[1] + "'>";
-    sdHtml += "<input type='color' id='c3_" + String(i) + "' value='" + cc[2] + "'>";
-    sdHtml += "</span></div>";
+    sdHtml += "<div id='cw" + String(i) + "' style='margin-top:6px'>";
+    sdHtml += "<small>3-color mode (ignored for Rainbow):</small><br/>";
+    sdHtml += "<label style='font-size:85%'>Hour <input type='color' id='c1_" + String(i) + "' value='" + cc[0] + "'></label> ";
+    sdHtml += "<label style='font-size:85%'>Minute <input type='color' id='c2_" + String(i) + "' value='" + cc[1] + "'></label> ";
+    sdHtml += "<label style='font-size:85%'>Word <input type='color' id='c3_" + String(i) + "' value='" + cc[2] + "'></label>";
+    sdHtml += "</div></div>";
   }
   sdHtml += "<script>var SD=[";
   for (int i = 0; i < NUM_SPECIAL; i++)
@@ -701,11 +702,11 @@ void setup() {
         var cw=document.getElementById('cw'+i), hid=document.getElementsByName('sd'+(i+1))[0];
         m.value=SD[i][0]; d.value=SD[i][1]; md.value=SD[i][2];
         function hx(id){return document.getElementById(id).value.replace('#','').toUpperCase();}
-        function tog(){ cw.style.display=(md.value==='1')?'none':'inline'; }
+        function dim(){ cw.style.opacity=(md.value==='1')?'0.4':'1'; }
         function upd(){ hid.value=m.value+','+d.value+','+md.value+','+hx('c1_'+i)+','+hx('c2_'+i)+','+hx('c3_'+i); }
-        [m,d,md].forEach(function(e){e.addEventListener('change',function(){tog();upd();});});
+        [m,d,md].forEach(function(e){e.addEventListener('change',function(){dim();upd();});});
         ['c1_','c2_','c3_'].forEach(function(p){document.getElementById(p+i).addEventListener('input',upd);});
-        tog(); upd();
+        dim(); upd();
       })(i);
     });
   )rawliteral");
@@ -1246,10 +1247,17 @@ void transitionToTime(int h, int m) {
   if      (frameLitCount>90 && original>80) pixels.setBrightness(80);
   else if (frameLitCount>60 && original>70) pixels.setBrightness(70);
 
-  if (anySet(mOut))  fadeMasked(mOut,  BLACK, FADE_OUT_MS);  // step 1: outgoing -> black
-  if (anySet(mConn)) fadeMasked(mConn, tgt,   FADE_IN_MS);   // step 2: connector fades in
-  if (anySet(mMin))  fadeMasked(mMin,  tgt,   FADE_IN_MS);   // step 3: minute fades in
-  if (anySet(mHour)) fadeMasked(mHour, tgt,   FADE_IN_MS);   // step 4: hour fades in (if changed)
+  if (anySet(mOut)) fadeMasked(mOut, BLACK, FADE_OUT_MS);    // step 1: outgoing -> black
+  if (m == 0) {
+    // top of the hour ("TEN O'CLOCK"): HOUR first, then O'CLOCK
+    if (anySet(mHour)) fadeMasked(mHour, tgt, FADE_IN_MS);
+    if (anySet(mMin))  fadeMasked(mMin,  tgt, FADE_IN_MS);   // "O'CLOCK" (or noon/midnight remainder)
+    if (anySet(mConn)) fadeMasked(mConn, tgt, FADE_IN_MS);   // (no connector at :00)
+  } else {
+    if (anySet(mMin))  fadeMasked(mMin,  tgt, FADE_IN_MS);   // step 2: minute fades in
+    if (anySet(mConn)) fadeMasked(mConn, tgt, FADE_IN_MS);   // step 3: connector fades in
+    if (anySet(mHour)) fadeMasked(mHour, tgt, FADE_IN_MS);   // step 4: hour fades in (if changed)
+  }
 
   memcpy(live, tgt, sizeof(live));
   pushLive();
