@@ -64,14 +64,6 @@
 uint8_t ledPin = DEFAULT_LED_PIN;       // may be overridden from Preferences (classic ESP32 only)
 bool    pinChangePending = false;       // set by portal save; triggers a reboot to apply
 
-#ifdef LED_PIN_SELECTABLE
-// Output-capable GPIOs that are not flash pins, input-only pins, or boot-strapping pins.
-static const uint8_t LED_PIN_CHOICES[] = {4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
-static bool validLedPin(int p) {
-  for (uint8_t c : LED_PIN_CHOICES) if (c == p) return true;
-  return false;
-}
-#endif
 
 Adafruit_NeoPixel pixels(NUMPIXELS, DEFAULT_LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -109,6 +101,18 @@ uint8_t g_curGroup = 0;     // group currently being painted by setLEDs()
 #define NUM_SPECIAL 5
 struct SpecialDay { uint8_t month; uint8_t day; uint8_t mode; uint32_t c1, c2, c3; };
 SpecialDay special[NUM_SPECIAL];
+
+// NOTE: keep this helper BELOW struct SpecialDay. Arduino auto-generates function
+// prototypes above the first function in the file; a function defined earlier than
+// the struct breaks every prototype that mentions SpecialDay (classic-ESP32 build only).
+#ifdef LED_PIN_SELECTABLE
+// Output-capable GPIOs that are not flash pins, input-only pins, or boot-strapping pins.
+static const uint8_t LED_PIN_CHOICES[] = {4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
+static bool validLedPin(int p) {
+  for (uint8_t c : LED_PIN_CHOICES) if (c == p) return true;
+  return false;
+}
+#endif
 int g_activeSpecial = -1;   // index of today's special day, or -1
 
 // Layout: 0 = Vertical, 1 = Horizontal
