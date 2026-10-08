@@ -62,10 +62,16 @@ jobs:
 
       - name: Compile (classic ESP32 Dev Module, default partition scheme)
         run: |
+          set -o pipefail
           arduino-cli compile \
             --fqbn "esp32:esp32:esp32:PartitionScheme=default" \
             --output-dir build-esp32 \
-            sketch/word_clock
+            sketch/word_clock 2>&1 | tee compile-esp32.log || {
+              # surface the real compiler error as annotations (job logs are awkward to reach)
+              grep -E -i "error|too big|overflow|undefined|not declared|Sketch uses" compile-esp32.log \
+                | head -20 | sed 's/^/::error::/'
+              exit 1
+            }
           ls -la build-esp32
 
       - name: Assemble site + firmware artifacts
