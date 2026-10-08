@@ -1,0 +1,16 @@
+{
+  "name": "Word Clock (ESP32 Dev Module)",
+  "version": "8",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "firmware/bootloader-esp32.bin",     "offset": 4096 },
+        { "path": "firmware/partitions-esp32.bin",     "offset": 32768 },
+        { "path": "firmware/boot_app0.bin",            "offset": 57344 },
+        { "path": "firmware/esp32-word-clock-esp32.bin", "offset": 65536 }
+      ]
+    }
+  ]
+}

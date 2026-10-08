@@ -50,7 +50,7 @@ jobs:
           arduino-cli core install esp32:esp32
           arduino-cli lib install "Adafruit NeoPixel" "WiFiManager" "ArduinoJson"
 
-      - name: Compile (ESP32-C3, OTA partition scheme)
+      - name: Compile (ESP32-C3)
         run: |
           mkdir -p sketch/word_clock
           cp esp32-word-clock.ino sketch/word_clock/word_clock.ino
@@ -60,19 +60,42 @@ jobs:
             sketch/word_clock
           ls -la build
 
+      - name: Compile (classic ESP32 Dev Module, default partition scheme)
+        run: |
+          set -o pipefail
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32:PartitionScheme=default" \
+            --output-dir build-esp32 \
+            sketch/word_clock 2>&1 | tee compile-esp32.log || {
+              # surface the real compiler error as annotations (job logs are awkward to reach)
+              grep -E -i "error|too big|overflow|undefined|not declared|Sketch uses" compile-esp32.log \
+                | head -20 | sed 's/^/::error::/'
+              exit 1
+            }
+          ls -la build-esp32
+
       - name: Assemble site + firmware artifacts
         run: |
           mkdir -p site/firmware
+          # ESP32-C3 (filenames unchanged: clocks in the field already download these)
           cp build/word_clock.ino.bin            site/firmware/esp32-word-clock.bin
           cp build/word_clock.ino.bootloader.bin site/firmware/bootloader.bin
           cp build/word_clock.ino.partitions.bin site/firmware/partitions.bin
           BOOTAPP=$(find "$HOME/.arduino15" -name boot_app0.bin | head -1)
           cp "$BOOTAPP" site/firmware/boot_app0.bin
+          # classic ESP32
+          cp build-esp32/word_clock.ino.bin            site/firmware/esp32-word-clock-esp32.bin
+          cp build-esp32/word_clock.ino.bootloader.bin site/firmware/bootloader-esp32.bin
+          cp build-esp32/word_clock.ino.partitions.bin site/firmware/partitions-esp32.bin
+          # single-file image for esptool / Flash Download Tool users (flash at 0x0)
+          if [ -f build-esp32/word_clock.ino.merged.bin ]; then
+            cp build-esp32/word_clock.ino.merged.bin site/firmware/esp32-word-clock-esp32-full.bin
+          fi
           cp -r docs/* site/
           # version.json the clocks poll:
           printf '{"version": %s}\n' "${{ steps.ver.outputs.version }}" > site/version.json
-          # keep the install manifest's version label in sync:
-          sed -i "s/\"version\": \"[0-9]*\"/\"version\": \"${{ steps.ver.outputs.version }}\"/" site/manifest.json
+          # keep the install manifests' version labels in sync:
+          sed -i "s/\"version\": \"[0-9]*\"/\"version\": \"${{ steps.ver.outputs.version }}\"/" site/manifest.json site/manifest-esp32.json
           echo "--- version.json ---"; cat site/version.json
           echo "--- site tree ---"; find site -type f
 
@@ -82,7 +105,10 @@ jobs:
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: Word Clock v${{ steps.ver.outputs.version }}
-          files: site/firmware/esp32-word-clock.bin
+          files: |
+            site/firmware/esp32-word-clock.bin
+            site/firmware/esp32-word-clock-esp32.bin
+            site/firmware/esp32-word-clock-esp32-full.bin
           make_latest: true
 
       - name: Configure Pages

@@ -95,6 +95,25 @@ Use a thick, non-runny clear adhesive (Gorilla Glue Clear works well). Runny glu
 
 ---
 
+## Classic ESP32 (Dev Module) Build
+
+The same source also builds for a classic ESP32 dev board (the original, non-C3 design). The right image is chosen by the board you compile for, and each chip auto-updates from its own binary.
+
+| | ESP32-C3 | Classic ESP32 |
+|---|---|---|
+| Arduino board | ESP32C3 Dev Module | ESP32 Dev Module |
+| LED data pin | GPIO 4 | GPIO 4 (default, selectable) |
+| Button pin | GPIO 9 | GPIO 0 (BOOT) |
+| Release file | `esp32-word-clock.bin` | `esp32-word-clock-esp32.bin` |
+
+**Easiest install:** open the installer page, click the button for your board, and pick the serial port. A normal install keeps WiFi/timezone settings.
+
+**LED stays dark?** On the classic ESP32 the data pin can be changed without reflashing: hold BOOT while powering on, join the `Word Clock Setup` WiFi network, pick the correct *LED Data Pin*, and save. The clock restarts on the new pin. The picker only offers GPIOs that are safe for NeoPixel data (not flash, input-only, or boot-strapping pins).
+
+**Manual flashing:** the release also includes `esp32-word-clock-esp32-full.bin`, a single merged image to write at address `0x0` with esptool or the Espressif Flash Download Tool.
+
+---
+
 ## ESP32-C3 Mounting
 
 The ESP32-C3 sits in a dedicated pocket in the base. **Orient it carefully before gluing** — the BOOT button must align with the access hole and the USB-C port must remain accessible. Once glued there is no repositioning it.

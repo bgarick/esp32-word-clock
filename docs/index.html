@@ -28,7 +28,8 @@
     }
     ol { margin: 0; padding-left: 1.25em; }
     ol li { margin: .4em 0; }
-    .install { margin: 24px 0 4px; text-align: center; }
+    .install { margin: 20px 0 4px; text-align: center; }
+    .board { margin: 0 0 8px; font-size: .95rem; }
     esp-web-install-button { --esp-tools-button-color: var(--accent); }
     .note {
       font-size: .9rem; color: var(--muted);
@@ -51,17 +52,28 @@
         <li>Wait for it to finish, then unplug. The clock keeps its WiFi and settings.</li>
       </ol>
 
+      <p><strong>Which board do you have?</strong></p>
       <div class="install">
+        <p class="board">ESP32-C3 Super Mini (tiny board, USB-C)</p>
         <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+      </div>
+      <div class="install">
+        <p class="board">ESP32 Dev Module (classic ESP32, e.g. ESP32-WROOM)</p>
+        <esp-web-install-button manifest="manifest-esp32.json"></esp-web-install-button>
       </div>
 
       <p class="note">
         If asked, do <strong>not</strong> choose <em>“Erase device”</em> — a normal install preserves your
         WiFi network, timezone, and layout. Only erase if you want to start completely fresh.
       </p>
+      <p class="note">
+        Classic ESP32 only: if the LEDs stay dark after install, the data wire is probably on a different pin.
+        Hold the board's <strong>BOOT</strong> button while plugging it in, join the <code>Word Clock Setup</code>
+        WiFi network, and choose the right <em>LED Data Pin</em>.
+      </p>
     </div>
 
-    <p class="foot">ESP32-C3 Word Clock &middot; updates pulled automatically from the latest release.</p>
+    <p class="foot">ESP32 Word Clock &middot; updates pulled automatically from the latest release.</p>
   </div>
 </body>
 </html>
