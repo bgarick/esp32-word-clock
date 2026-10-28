@@ -18,12 +18,8 @@
     - Layout (Vertical / Horizontal) selectable via portal (saved to Preferences)
 
   v11 changes:
-    - One source, two builds. Target is picked at compile time:
-        ESP32-C3 (Super Mini)      -> LED GPIO4, button GPIO9, esp32-word-clock.bin
-        classic ESP32 (Dev Module) -> LED GPIO4 (selectable in portal), button GPIO0,
-                                      esp32-word-clock-esp32.bin
-    - Classic ESP32: LED data pin is selectable in the setup portal (safe GPIOs only).
-    - OTA downloads the binary that matches the chip it is running on.
+    - Classic ESP32 support moved to its own repo (github.com/bgarick/esp32-word-clock-classic).
+      This firmware is ESP32-C3 only (LED GPIO4, button GPIO9, esp32-word-clock.bin).
 */
 
 #include <WiFi.h>
@@ -45,24 +41,16 @@
 #define NUMPIXELS  144
 #define DELAYVAL   30000
 
-// ---- Per-chip build target (chosen automatically by the selected board) ----
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-  #define BOARD_NAME        "ESP32-C3"
-  #define DEFAULT_LED_PIN   4
-  #define BTN_PIN           9                          // BOOT button on C3 Super Mini
-  #define FW_BIN_NAME       "esp32-word-clock.bin"     // name kept for clocks already in the field
-#elif defined(CONFIG_IDF_TARGET_ESP32)
-  #define BOARD_NAME        "ESP32"
-  #define DEFAULT_LED_PIN   4
-  #define BTN_PIN           0                          // BOOT button on classic ESP32 dev boards
-  #define FW_BIN_NAME       "esp32-word-clock-esp32.bin"
-  #define LED_PIN_SELECTABLE 1                         // pin picker shown in setup portal
-#else
-  #error "Unsupported chip: build for ESP32-C3 or classic ESP32"
+// ---- ESP32-C3 build ----
+#if !defined(CONFIG_IDF_TARGET_ESP32C3)
+  #error "This firmware targets the ESP32-C3. For the classic ESP32, use github.com/bgarick/esp32-word-clock-classic"
 #endif
+#define BOARD_NAME        "ESP32-C3"
+#define DEFAULT_LED_PIN   4
+#define BTN_PIN           9                          // BOOT button on C3 Super Mini
+#define FW_BIN_NAME       "esp32-word-clock.bin"     // name kept for clocks already in the field
 
-uint8_t ledPin = DEFAULT_LED_PIN;       // may be overridden from Preferences (classic ESP32 only)
-bool    pinChangePending = false;       // set by portal save; triggers a reboot to apply
+uint8_t ledPin = DEFAULT_LED_PIN;
 
 
 Adafruit_NeoPixel pixels(NUMPIXELS, DEFAULT_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -104,15 +92,7 @@ SpecialDay special[NUM_SPECIAL];
 
 // NOTE: keep this helper BELOW struct SpecialDay. Arduino auto-generates function
 // prototypes above the first function in the file; a function defined earlier than
-// the struct breaks every prototype that mentions SpecialDay (classic-ESP32 build only).
-#ifdef LED_PIN_SELECTABLE
-// Output-capable GPIOs that are not flash pins, input-only pins, or boot-strapping pins.
-static const uint8_t LED_PIN_CHOICES[] = {4, 13, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
-static bool validLedPin(int p) {
-  for (uint8_t c : LED_PIN_CHOICES) if (c == p) return true;
-  return false;
-}
-#endif
+// the struct breaks every prototype that mentions SpecialDay.
 int g_activeSpecial = -1;   // index of today's special day, or -1
 
 // Layout: 0 = Vertical, 1 = Horizontal
@@ -126,7 +106,6 @@ uint8_t layout = 0;
 // ============================================================================
 #define FW_VERSION 11
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
-// Each chip downloads its own binary (a C3 image will not boot on a classic ESP32 and vice versa).
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/" FW_BIN_NAME;
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
 
@@ -567,12 +546,6 @@ void setup() {
   prefs.begin("settings", true);
   String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
   layout    = prefs.getUChar("layout",    0);
-#ifdef LED_PIN_SELECTABLE
-  {
-    int p = prefs.getUChar("ledPin", DEFAULT_LED_PIN);
-    ledPin = validLedPin(p) ? (uint8_t)p : DEFAULT_LED_PIN;
-  }
-#endif
   loadSpecialDays();
   prefs.end();
 
@@ -789,38 +762,6 @@ void setup() {
   WiFiManagerParameter layoutHTMLParam(layoutHtml.c_str());
   wm.addParameter(&layoutHTMLParam);
 
-#ifdef LED_PIN_SELECTABLE
-  // LED data pin (classic ESP32 only). Changing it reboots the clock to apply.
-  WiFiManagerParameter ledPinParam("ledpin", "", String(ledPin).c_str(), 4, "type='hidden'");
-  wm.addParameter(&ledPinParam);
-
-  String pinHtml;
-  pinHtml.reserve(800);
-  pinHtml += F("<label>LED Data Pin (GPIO):</label><br/>");
-  pinHtml += F("<select id='ledpin_sel' style='width:100%;padding:6px;'>");
-  for (uint8_t c : LED_PIN_CHOICES) {
-    pinHtml += "<option value='" + String(c) + "'>GPIO " + String(c) + (c == DEFAULT_LED_PIN ? " (default)" : "") + "</option>";
-  }
-  pinHtml += F("</select>");
-  pinHtml += F("<small style='color:#888'>Only change this if the LEDs stay dark. The clock restarts after saving.</small>");
-  pinHtml += F(R"rawliteral(
-    <script>
-      document.addEventListener('DOMContentLoaded', function(){
-        var sel = document.getElementById('ledpin_sel');
-        var hid = document.getElementsByName('ledpin')[0];
-        if(sel && hid){
-          for(var i=0;i<sel.options.length;i++){
-            if(sel.options[i].value===hid.value){ sel.selectedIndex=i; break; }
-          }
-          sel.addEventListener('change', function(){ hid.value=this.value; });
-        }
-      });
-    </script>
-    <br/><br/>
-  )rawliteral");
-  WiFiManagerParameter ledPinHTMLParam(pinHtml.c_str());
-  wm.addParameter(&ledPinHTMLParam);
-#endif
 
   // Firmware version label (visible in the config portal)
   String fwHtml = String("<p style='text-align:center;color:#888;margin-top:8px'>Firmware v") + FW_VERSION + " (" BOARD_NAME ")</p>";
@@ -844,15 +785,6 @@ void setup() {
       prefs.putString(key.c_str(), serializeSpecial(tmp));
     }
     prefs.putUChar("layout",     (uint8_t)lTmp);
-#ifdef LED_PIN_SELECTABLE
-    int pTmp = atoi(ledPinParam.getValue());
-    if (!validLedPin(pTmp)) pTmp = ledPin;
-    if (pTmp != ledPin) {
-      prefs.putUChar("ledPin", (uint8_t)pTmp);
-      pinChangePending = true;
-      Serial.printf("[PORTAL]   LED pin : GPIO%d -> GPIO%d (reboot pending)\n", ledPin, pTmp);
-    }
-#endif
     prefs.end();
 
     layout    = (uint8_t)lTmp;
@@ -910,12 +842,6 @@ void setup() {
   if (!connected) {
     Serial.println("[WIFI] Still not connected -- forcing restart.");
     delay(1000);
-    ESP.restart();
-  }
-
-  if (pinChangePending) {
-    Serial.println("[LED] LED pin changed in portal -- restarting to apply.");
-    delay(500);
     ESP.restart();
   }
 
