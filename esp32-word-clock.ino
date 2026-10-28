@@ -18,8 +18,20 @@
     - Layout (Vertical / Horizontal) selectable via portal (saved to Preferences)
 
   v11 changes:
-    - Classic ESP32 support moved to its own repo (github.com/bgarick/esp32-word-clock-classic).
-      This firmware is ESP32-C3 only (LED GPIO4, button GPIO9, esp32-word-clock.bin).
+    - OTA auto-update (version.json + GitHub Release binary), Special Days, staggered fade.
+
+  v12 changes:
+    - New layout 2: Crossword 16x8 (128 LEDs, two 8x8 panels; both panels follow the same
+      wiring pattern, lower panel = LEDs 0-63, upper panel = LEDs 64-127).
+    - New layout 3: Square 12x12 (144 LEDs), word map from WC_ESP32Mini_square_v7.
+      (Not yet verified on hardware.)
+    - Layouts 0 and 1 are unchanged. Layouts 2 and 3 lack some words (FIFTEEN / AFTER / TIL /
+      BEFORE), so showTime() picks only from the connector words the active layout has.
+    - ESP32-C3: Wi-Fi TX power limited to 8.5 dBm (full power can make the setup AP invisible).
+    - Saved-WiFi wait at boot raised from 12 s to 30 s.
+    - Per-layout brightness (16x8 = 75, all others 15).
+    - DEFAULT_LAYOUT / FORCE_LAYOUT build options. Leave FORCE_LAYOUT at -1 for published builds.
+    - ESP32-C3 only. Classic ESP32 lives in github.com/bgarick/esp32-word-clock-classic.
 */
 
 #include <WiFi.h>
@@ -38,17 +50,24 @@
 #include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 
-#define NUMPIXELS  144
+#define NUMPIXELS  144          // buffer size = largest layout
+#define BRIGHTNESS_DEFAULT 15   // layouts 0, 1, 3
+#define BRIGHTNESS_16X8    75   // layout 2 (value used on the 16x8 bench clock)
+#define DEFAULT_LAYOUT 0        // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12 (used until a layout is saved)
+#define FORCE_LAYOUT   -1      // -1 = use the saved layout; 0..3 = ALWAYS use this layout and ignore the saved one (one board, one plate)
+#define STORED_WIFI_WAIT_MS 30000   // how long to wait for saved WiFi at boot before opening the setup portal (was 12000; too short on a weak signal)
+#define C3_TX_POWER    WIFI_POWER_8_5dBm   // C3 Super Mini radio cap. Lower = setup AP visible; higher = better range. Try 11dBm / 13dBm if WiFi is weak.
 #define DELAYVAL   30000
 
-// ---- ESP32-C3 build ----
-#if !defined(CONFIG_IDF_TARGET_ESP32C3)
-  #error "This firmware targets the ESP32-C3. For the classic ESP32, use github.com/bgarick/esp32-word-clock-classic"
+// ---- Build target: ESP32-C3 only (Super Mini). Board: ESP32C3 Dev Module, USB CDC On Boot: Enabled ----
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  #define BOARD_NAME        "ESP32-C3"
+  #define DEFAULT_LED_PIN   4
+  #define BTN_PIN           9                          // BOOT button on C3 Super Mini
+  #define FW_BIN_NAME       "esp32-word-clock.bin"     // name kept for clocks already in the field
+#else
+  #error "This firmware is ESP32-C3 only. Select Tools > Board > ESP32C3 Dev Module."
 #endif
-#define BOARD_NAME        "ESP32-C3"
-#define DEFAULT_LED_PIN   4
-#define BTN_PIN           9                          // BOOT button on C3 Super Mini
-#define FW_BIN_NAME       "esp32-word-clock.bin"     // name kept for clocks already in the field
 
 uint8_t ledPin = DEFAULT_LED_PIN;
 
@@ -66,7 +85,7 @@ time_t nowEpoch;
 int    year_, month_, day_, hour_, minute_;
 int    r = 0, g = 0, b = 0;
 uint16_t frameLitCount = 0;
-uint8_t brightness = 15;   // fixed default; no longer user-configurable
+uint8_t brightness = BRIGHTNESS_DEFAULT;   // set per layout in applyLayout(); not user-configurable
 
 // ============================================================================
 // Fade / transition state  (added 2026-10-03: smooth staggered time changes)
@@ -95,8 +114,9 @@ SpecialDay special[NUM_SPECIAL];
 // the struct breaks every prototype that mentions SpecialDay.
 int g_activeSpecial = -1;   // index of today's special day, or -1
 
-// Layout: 0 = Vertical, 1 = Horizontal
-uint8_t layout = 0;
+// Layout: 0 = Vertical, 1 = Horizontal, 2 = Crossword 16x8, 3 = Square 12x12
+uint8_t layout = DEFAULT_LAYOUT;
+uint16_t activeLeds = NUMPIXELS;   // LEDs on the strip for the active layout (144, or 128 for layout 2)
 
 // ============================================================================
 // OTA auto-update (added 2026-10-03)
@@ -104,7 +124,7 @@ uint8_t layout = 0;
 // to Pages and the firmware .bin to the latest Release; the clock updates when
 // the published version is higher than the one baked in here.
 // ============================================================================
-#define FW_VERSION 11
+#define FW_VERSION 12
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/" FW_BIN_NAME;
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
@@ -220,6 +240,155 @@ int H_wifiAnim[]   = { 78,73,28,29 };
 int H_noAnim[]     = { 48,47 };
 
 // ============================================================================
+// Layout 2 -- CROSSWORD 16x8 (128 LEDs): two 8x8 panels, panel 0 below panel 1.
+//   Panel 0 (rows 8-15): LED 0 top-left, down column 0, up column 1, ...
+//   Panel 1 (rows 0-7):  same pattern rotated 180 degrees (LED 64 at its bottom-right).
+// Words are built at boot from the letter grid, so the whole map lives in cwLedIndex().
+// Verified on hardware 2026-10-19 (word test).
+// ============================================================================
+#define CW_ROWS 16
+#define CW_COLS 8
+#define CW_LEDS 128
+
+static const char CW_GRID[CW_ROWS][CW_COLS + 1] = {
+  "TFSTHREE", "WOIEATLT", "EUXNLHEW", "NRFIFIVE",
+  "TWONEREL", "YASEVENV", "QUARTERE", "EIGHTEEN",
+  "OFTOPAST", "FOURSIXE", "IOCLOCKL", "VNTWELVE",
+  "EIGHTWOV", "ONETHREE", "SEVENOON", "MIDNIGHT"
+};
+
+// (row, col) -> LED index.  r: 0 = top, c: 0 = left.
+// Both panels use the same pattern: LED 0 of the panel at its top-left,
+// down col 0, up col 1, ...  (upper panel = LEDs 64-127, lower panel = LEDs 0-63)
+int cwLedIndex(int r, int c) {
+  int base = (r >= 8) ? 0 : 64;
+  int rr   = r & 7;                       // row within the panel
+  return base + c * 8 + ((c & 1) ? 7 - rr : rr);
+}
+
+// ---- crossword word arrays (C_ prefix; applyLayout() points the active words at these) ----
+int C_oneMin[3], C_twoMin[3], C_threeMin[5], C_fourMin[4], C_fiveMin[4], C_sixMin[3], C_sevenMin[5], C_eightMin[5];
+int C_nineMin[4], C_tenMin[3], C_elevenMin[6], C_twelveMin[6];
+int C_thirPart[4], C_fifPart[3], C_eighPart[4], C_teenPart[4];
+int C_thirteen[8], C_fourteen[8], C_fifteen[7], C_sixteen[7], C_seventeen[9], C_eighteen[8], C_nineteen[8];
+int C_quarter[7], C_twenty[6], C_half_[4], C_past[4], C_of[2], C_to_[2];
+int C_oneHour[3], C_twoHour[3], C_threeHour[5], C_fourHour[4], C_fiveHour[4], C_sixHour[3], C_sevenHour[5], C_eightHour[5];
+int C_nineHour[4], C_tenHour[3], C_elevenHour[6], C_twelveHour[6], C_noon[4], C_midnight[8], C_oclock[6];
+int C_wifiAnim[4], C_noAnim[2];
+
+// n letters starting at (r,c), stepping (dr,dc): across = (0,1), down = (1,0)
+static void cwPut(int* d, int r, int c, int dr, int dc, int n) {
+  for (int i = 0; i < n; i++) d[i] = cwLedIndex(r + dr * i, c + dc * i);
+}
+static void cwJoin(int* d, const int* a, int na, const int* b, int nb) {
+  for (int i = 0; i < na; i++) d[i] = a[i];
+  for (int i = 0; i < nb; i++) d[na + i] = b[i];
+}
+
+void buildCrosswordWords() {
+  // ---- minute words (top band) ----
+  cwPut(C_twenty,    0, 0, 1, 0, 6);   // down col 0
+  cwPut(C_oneMin,    4, 2, 0, 1, 3);
+  cwPut(C_twoMin,    4, 0, 0, 1, 3);   // shares the T of TWENTY (r4 c0)
+  cwPut(C_threeMin,  0, 3, 0, 1, 5);
+  cwPut(C_fourMin,   0, 1, 1, 0, 4);   // down col 1
+  cwPut(C_fiveMin,   3, 4, 0, 1, 4);
+  cwPut(C_sixMin,    0, 2, 1, 0, 3);   // down col 2
+  cwPut(C_sevenMin,  5, 2, 0, 1, 5);
+  cwPut(C_eightMin,  7, 0, 0, 1, 5);
+  cwPut(C_nineMin,   2, 3, 1, 0, 4);   // down col 3 (shares N with TEN)
+  cwPut(C_tenMin,    0, 3, 1, 0, 3);   // down col 3
+  cwPut(C_elevenMin, 0, 6, 1, 0, 6);   // down col 6
+  cwPut(C_twelveMin, 1, 7, 1, 0, 6);   // down col 7
+  cwPut(C_half_,     0, 4, 1, 0, 4);   // down col 4
+  cwPut(C_quarter,   6, 0, 0, 1, 7);
+  cwPut(C_thirPart,  1, 5, 1, 0, 4);   // THIR down col 5
+  cwPut(C_fifPart,   3, 2, 0, 1, 3);   // FIF
+  cwPut(C_eighPart,  7, 0, 0, 1, 4);   // EIGH
+  cwPut(C_teenPart,  7, 4, 0, 1, 4);   // TEEN
+  cwJoin(C_thirteen,  C_thirPart, 4, C_teenPart, 4);
+  cwJoin(C_fourteen,  C_fourMin,  4, C_teenPart, 4);
+  cwJoin(C_fifteen,   C_fifPart,  3, C_teenPart, 4);
+  cwJoin(C_sixteen,   C_sixMin,   3, C_teenPart, 4);
+  cwJoin(C_seventeen, C_sevenMin, 5, C_teenPart, 4);
+  cwJoin(C_eighteen,  C_eighPart, 4, C_teenPart, 4);
+  cwJoin(C_nineteen,  C_nineMin,  4, C_teenPart, 4);
+  // ---- connectors ----
+  cwPut(C_of,        8, 0, 0, 1, 2);
+  cwPut(C_to_,       8, 2, 0, 1, 2);
+  cwPut(C_past,      8, 4, 0, 1, 4);
+  cwPut(C_oclock,   10, 1, 0, 1, 6);
+  // ---- hour words (bottom band) ----
+  cwPut(C_fourHour,   9, 0, 0, 1, 4);
+  cwPut(C_sixHour,    9, 4, 0, 1, 3);
+  cwPut(C_fiveHour,   9, 0, 1, 0, 4);   // down col 0
+  cwPut(C_elevenHour, 9, 7, 1, 0, 6);   // down col 7
+  cwPut(C_twelveHour, 11, 2, 0, 1, 6);
+  cwPut(C_nineHour,  11, 1, 1, 0, 4);   // down col 1
+  cwPut(C_eightHour, 12, 0, 0, 1, 5);
+  cwPut(C_twoHour,   12, 4, 0, 1, 3);
+  cwPut(C_oneHour,   13, 0, 0, 1, 3);
+  cwPut(C_threeHour, 13, 3, 0, 1, 5);
+  cwPut(C_tenHour,   13, 3, 1, 0, 3);   // down col 3
+  cwPut(C_sevenHour, 14, 0, 0, 1, 5);
+  cwPut(C_noon,      14, 4, 0, 1, 4);
+  cwPut(C_midnight,  15, 0, 0, 1, 8);
+  // ---- startup / portal animation: spin around the corners; centre pair for "no WiFi" ----
+  C_wifiAnim[0] = cwLedIndex(0, 0);  C_wifiAnim[1] = cwLedIndex(0, 7);
+  C_wifiAnim[2] = cwLedIndex(15, 7); C_wifiAnim[3] = cwLedIndex(15, 0);
+  C_noAnim[0]   = cwLedIndex(7, 3);  C_noAnim[1]   = cwLedIndex(8, 3);
+  Serial.println("[LAYOUT] 16x8 plate word map built.");
+}
+
+// ============================================================================
+// Layout 3 -- SQUARE 12x12 (144 LEDs). Word map taken from WC_ESP32Mini_square_v7.
+// This plate has QUARTER only (no FIFTEEN) and no BEFORE; it does have AFTER, PAST, TIL, OF, TO.
+// ============================================================================
+int S_oneMin[]      = { 76, 31, 30 };
+int S_twoMin[]      = { 76, 83, 84 };
+int S_threeMin[]    = { 84, 39, 38, 37, 36 };
+int S_fourMin[]     = { 120, 121, 122, 123 };
+int S_fiveMin[]     = { 124, 79, 78, 77 };
+int S_sixMin[]      = { 87, 86, 85 };
+int S_sevenMin[]    = { 128, 129, 130, 131, 80 };
+int S_eightMin[]    = { 136, 137, 138, 139, 88 };
+int S_nineMin[]     = { 135, 134, 133, 132 };
+int S_tenMin[]      = { 143, 136, 135 };
+int S_elevenMin[]   = { 93, 92, 47, 46, 45, 44 };
+int S_twelveMin[]   = { 82, 83, 32, 33, 34, 35 };
+int S_thirteen[]    = { 72, 73, 74, 75, 24, 25, 26, 27 };
+int S_fourteen[]    = { 120, 121, 122, 123, 24, 25, 26, 27 };
+int S_quarter[]     = { 89, 90, 91, 40, 41, 42, 43 };
+int S_sixteen[]     = { 87, 86, 85, 24, 25, 26, 27 };
+int S_seventeen[]   = { 128, 129, 130, 131, 80, 24, 25, 26, 27 };
+int S_eighteen[]    = { 136, 137, 138, 139, 24, 25, 26, 27 };
+int S_nineteen[]    = { 135, 134, 133, 132, 24, 25, 26, 27 };
+int S_twenty[]      = { 143, 142, 141, 140, 95, 94 };
+int S_half_[]       = { 127, 126, 125, 124 };
+int S_after[]       = { 113, 114, 115, 64, 65 };
+int S_past[]        = { 69, 68, 23, 22 };
+int S_til[]         = { 22, 21, 20 };
+int S_of[]          = { 119, 112 };
+int S_to_[]         = { 29, 28 };
+int S_oneHour[]     = { 103, 102, 101 };
+int S_twoHour[]     = { 59, 52, 51 };
+int S_threeHour[]   = { 59, 8, 9, 10, 11 };
+int S_fourHour[]    = { 63, 62, 61, 60 };
+int S_fiveHour[]    = { 111, 110, 109, 108 };
+int S_sixHour[]     = { 1, 2, 3 };
+int S_sevenHour[]   = { 96, 97, 98, 99, 48 };
+int S_eightHour[]   = { 101, 100, 55, 54, 53 };
+int S_nineHour[]    = { 12, 13, 14, 15 };
+int S_tenHour[]     = { 115, 108, 107 };
+int S_elevenHour[]  = { 66, 67, 16, 17, 18, 19 };
+int S_twelveHour[]  = { 53, 52, 7, 6, 5, 4 };
+int S_noon[]        = { 49, 50, 51, 0 };
+int S_midnight[]    = { 104, 105, 106, 107, 56, 57, 58, 59 };
+int S_oclock[]      = { 119, 118, 117, 116, 71, 70 };
+int S_wifiAnim[]    = { 142, 137, 124, 79 };
+int S_noAnim[]      = { 49, 50 };
+
+// ============================================================================
 // Active pointers — set by applyLayout()
 // ============================================================================
 int* oneMin;
@@ -315,8 +484,48 @@ const int LEN_oclock     = 6;
 const int LEN_wifiAnim   = 4;
 const int LEN_noAnim     = 2;
 
+static const char* layoutName(uint8_t l) {
+  return l == 0 ? "Vertical" : (l == 1 ? "Horizontal" : (l == 2 ? "Crossword 16x8" : "Square 12x12"));
+}
+
 void applyLayout() {
-  if (layout == 0) {
+  brightness = (layout == 2) ? BRIGHTNESS_16X8 : BRIGHTNESS_DEFAULT;
+  activeLeds = (layout == 2) ? CW_LEDS : NUMPIXELS;
+  if (layout == 2) {
+    buildCrosswordWords();
+    oneMin = C_oneMin; twoMin = C_twoMin; threeMin = C_threeMin;
+    fourMin = C_fourMin; fiveMin = C_fiveMin; sixMin = C_sixMin;
+    sevenMin = C_sevenMin; eightMin = C_eightMin; nineMin = C_nineMin;
+    tenMin = C_tenMin; elevenMin = C_elevenMin; twelveMin = C_twelveMin;
+    thirteen = C_thirteen; fourteen = C_fourteen; fifteen = C_fifteen;
+    sixteen = C_sixteen; seventeen = C_seventeen; eighteen = C_eighteen;
+    nineteen = C_nineteen; quarter = C_quarter; twenty = C_twenty;
+    half_ = C_half_; past = C_past; of = C_of;
+    to_ = C_to_; oneHour = C_oneHour; twoHour = C_twoHour;
+    threeHour = C_threeHour; fourHour = C_fourHour; fiveHour = C_fiveHour;
+    sixHour = C_sixHour; sevenHour = C_sevenHour; eightHour = C_eightHour;
+    nineHour = C_nineHour; tenHour = C_tenHour; elevenHour = C_elevenHour;
+    twelveHour = C_twelveHour; noon = C_noon; midnight = C_midnight;
+    oclock = C_oclock; wifiAnim = C_wifiAnim; noAnim = C_noAnim;
+    after = nullptr; til = nullptr; before = nullptr;   // this plate has no AFTER / TIL / BEFORE
+  } else if (layout == 3) {
+    oneMin = S_oneMin; twoMin = S_twoMin; threeMin = S_threeMin;
+    fourMin = S_fourMin; fiveMin = S_fiveMin; sixMin = S_sixMin;
+    sevenMin = S_sevenMin; eightMin = S_eightMin; nineMin = S_nineMin;
+    tenMin = S_tenMin; elevenMin = S_elevenMin; twelveMin = S_twelveMin;
+    thirteen = S_thirteen; fourteen = S_fourteen; quarter = S_quarter;
+    sixteen = S_sixteen; seventeen = S_seventeen; eighteen = S_eighteen;
+    nineteen = S_nineteen; twenty = S_twenty; half_ = S_half_;
+    after = S_after; past = S_past; til = S_til;
+    of = S_of; to_ = S_to_; oneHour = S_oneHour;
+    twoHour = S_twoHour; threeHour = S_threeHour; fourHour = S_fourHour;
+    fiveHour = S_fiveHour; sixHour = S_sixHour; sevenHour = S_sevenHour;
+    eightHour = S_eightHour; nineHour = S_nineHour; tenHour = S_tenHour;
+    elevenHour = S_elevenHour; twelveHour = S_twelveHour; noon = S_noon;
+    midnight = S_midnight; oclock = S_oclock; wifiAnim = S_wifiAnim;
+    noAnim = S_noAnim;
+    fifteen = nullptr; before = nullptr;   // square has QUARTER only and no BEFORE
+  } else if (layout == 0) {
     oneMin     = V_oneMin;     twoMin     = V_twoMin;
     threeMin   = V_threeMin;   fourMin    = V_fourMin;
     fiveMin    = V_fiveMin;    sixMin     = V_sixMin;
@@ -365,7 +574,8 @@ void applyLayout() {
     oclock     = H_oclock;     wifiAnim   = H_wifiAnim;
     noAnim     = H_noAnim;
   }
-  Serial.printf("[LAYOUT] Active layout: %s\n", layout == 0 ? "Vertical" : "Horizontal");
+  if (pixels.numPixels() != activeLeds) pixels.updateLength(activeLeds);
+  Serial.printf("[LAYOUT] Active layout: %s (%u LEDs)\n", layoutName(layout), (unsigned)activeLeds);
 }
 
 void applyTimezone(const char* tz);
@@ -545,14 +755,15 @@ void setup() {
   Serial.println("[PREFS] Loading saved settings...");
   prefs.begin("settings", true);
   String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-  layout    = prefs.getUChar("layout",    0);
+  layout    = prefs.getUChar("layout",    DEFAULT_LAYOUT);
   loadSpecialDays();
   prefs.end();
 
-  if (layout > 1) layout = 0;
+  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
 
   Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
-    storedTZ.c_str(), special[0].month, special[0].day, layout == 0 ? "Vertical" : "Horizontal");
+    storedTZ.c_str(), special[0].month, special[0].day, layoutName(layout));
 
   applyLayout();
 
@@ -574,6 +785,9 @@ void setup() {
   delay(200);
   WiFi.mode(WIFI_STA);
   delay(500);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
+#endif
   WiFi.persistent(true);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false);
@@ -743,6 +957,8 @@ void setup() {
   layoutHtml += F("<select id='layout_sel' style='width:100%;padding:6px;'>");
   layoutHtml += F("<option value='0'>Vertical (4x36)</option>");
   layoutHtml += F("<option value='1'>Horizontal (36x4)</option>");
+  layoutHtml += F("<option value='2'>Crossword (16x8, 128 LEDs)</option>");
+  layoutHtml += F("<option value='3'>Square (12x12)</option>");
   layoutHtml += F("</select>");
   layoutHtml += F(R"rawliteral(
     <script>
@@ -773,7 +989,7 @@ void setup() {
     const char* tz = tzParam.getValue();
 
     int lTmp = atoi(layoutParam.getValue());
-    if (lTmp < 0 || lTmp > 1) lTmp = 0;
+    if (lTmp < 0 || lTmp > 3) lTmp = 0;   // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12
 
     prefs.begin("settings", false);
     prefs.putString("tz",        tz);
@@ -794,11 +1010,11 @@ void setup() {
     Serial.printf("[PORTAL]   TZ      : %s\n", tz);
     for (int i = 0; i < NUM_SPECIAL; i++)
       Serial.printf("[PORTAL]   SpecialDay %d: %02u/%02u mode=%u\n", i+1, special[i].month, special[i].day, special[i].mode);
-    Serial.printf("[PORTAL]   Layout  : %s\n", layout == 0 ? "Vertical" : "Horizontal");
+    Serial.printf("[PORTAL]   Layout  : %s\n", layoutName(layout));
   });
 
   wm.setConfigPortalBlocking(true);
-  wm.setConnectTimeout(12);
+  wm.setConnectTimeout(30);
   wm.setConfigPortalTimeout(240);
 
   bool connected = false;
@@ -808,7 +1024,7 @@ void setup() {
     WiFi.begin();
     unsigned long t0 = millis();
     int dots = 0;
-    while ((millis() - t0) < 12000 && WiFi.status() != WL_CONNECTED) {
+    while ((millis() - t0) < STORED_WIFI_WAIT_MS && WiFi.status() != WL_CONNECTED) {
       if (dots++ % 10 == 0) Serial.print(".");
       delay(100);
     }
@@ -827,6 +1043,9 @@ void setup() {
     WiFi.disconnect(true, false);
     WiFi.mode(WIFI_AP_STA);
     delay(100);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
+#endif
     if (!wm.autoConnect("Word Clock Setup")) {
       Serial.println("[WIFI] Portal timed out without connection. Rebooting in 3s...");
       delay(3000);
@@ -855,13 +1074,14 @@ void setup() {
   loadSpecialDays();
   prefs.end();
 
-  if (layout > 1) layout = 0;
+  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
 
   applyLayout();
 
   Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s  Brightness: %u (fixed)\n",
     timezone.c_str(), special[0].month, special[0].day,
-    layout == 0 ? "Vertical" : "Horizontal", brightness);
+    layoutName(layout), brightness);
 
   applyTimezone(timezone.c_str());
   ensureTimeSynced();
@@ -924,11 +1144,12 @@ void loop() {
         layout    = prefs.getUChar("layout",    layout);
         loadSpecialDays();
         prefs.end();
-        if (layout > 1) layout = 0;
+        if (layout > 3) layout = DEFAULT_LAYOUT;
+        if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
         applyLayout();
         Serial.printf("[BTN] Applied TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
           timezone.c_str(), special[0].month, special[0].day,
-          layout == 0 ? "Vertical" : "Horizontal");
+          layoutName(layout));
         applyTimezone(timezone.c_str());
         ensureTimeSynced();
         lastMinute = -1;
@@ -1095,7 +1316,7 @@ void showTime(int hour, int minute) {
     case 12: case 48: setLEDs(twelveMin, LEN_twelveMin); break;
     case 13: case 47: setLEDs(thirteen,  LEN_thirteen); break;
     case 14: case 46: setLEDs(fourteen,  LEN_fourteen); break;
-    case 15: case 45: if(random(0,2)==0) setLEDs(quarter,LEN_quarter); else setLEDs(fifteen,LEN_fifteen); break;
+    case 15: case 45: if(!fifteen || random(0,2)==0) setLEDs(quarter,LEN_quarter); else setLEDs(fifteen,LEN_fifteen); break;
     case 16: case 44: setLEDs(sixteen,   LEN_sixteen);  break;
     case 17: case 43: setLEDs(seventeen, LEN_seventeen); break;
     case 18: case 42: setLEDs(eighteen,  LEN_eighteen); break;
@@ -1118,15 +1339,19 @@ void showTime(int hour, int minute) {
   int hourForDisplay = hour;
 
   if (minute > 0 && minute <= 30) {
-    if (random(0,2)==0) setLEDs(after,LEN_after); else setLEDs(past,LEN_past);
+    // AFTER is optional (not on the crossword plate); PAST is on every layout.
+    if (after && random(0,2)==0) setLEDs(after,LEN_after); else setLEDs(past,LEN_past);
   } else if (minute > 30) {
-    if (minute==59||minute==47||minute==46) {
-      int pick=random(0,3);
-      if(pick==0) setLEDs(of,LEN_of); else if(pick==1) setLEDs(til,LEN_til); else setLEDs(before,LEN_before);
-    } else {
-      int pick=random(0,3);
-      if(pick==0) setLEDs(of,LEN_of); else if(pick==1) setLEDs(til,LEN_til); else setLEDs(to_,LEN_to_);
-    }
+    // Candidates: OF, TIL (if present), and BEFORE at :46/:47/:59 (if present) else TO.
+    // With all three present this is the same 1/3 each as before.
+    bool useBefore = (minute==59||minute==47||minute==46) && before;
+    int* cw[3]; int cl[3]; int n = 0;
+    cw[n] = of;                        cl[n++] = LEN_of;
+    if (til) { cw[n] = til;            cl[n++] = LEN_til; }
+    if (useBefore) { cw[n] = before;   cl[n++] = LEN_before; }
+    else           { cw[n] = to_;      cl[n++] = LEN_to_; }
+    int pick = random(0, n);
+    setLEDs(cw[pick], cl[pick]);
     hourForDisplay = (hour + 1) % 24;
   }
 
@@ -1162,6 +1387,12 @@ void setLEDs(int a[], int len) {
   const bool july4   = g_forceJuly4   || (!sActive && isJuly4());
   const bool rainbow = g_forceRainbow || sRainbow || (!sActive && isPride());
   uint8_t baseR=gamma8(r), baseG=gamma8(g), baseB=gamma8(b);
+
+  if (debug) {   // what the firmware intends to light: group (1 hour, 2 minute, 3 connector) + LED indexes
+    Serial.printf("[SHOW] g%d:", g_curGroup);
+    for (int i=0; i<len; i++) Serial.printf(" %d", a[i]);
+    Serial.println();
+  }
 
   for (int i=0; i<len; i++) {
     int idx = a[i];
