@@ -989,7 +989,7 @@ void setup() {
     const char* tz = tzParam.getValue();
 
     int lTmp = atoi(layoutParam.getValue());
-    if (lTmp < 0 || lTmp > 1) lTmp = 0;
+    if (lTmp < 0 || lTmp > 3) lTmp = 0;   // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12
 
     prefs.begin("settings", false);
     prefs.putString("tz",        tz);
