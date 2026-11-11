@@ -32,6 +32,25 @@
     - Per-layout brightness (16x8 = 75, all others 15).
     - DEFAULT_LAYOUT / FORCE_LAYOUT build options. Leave FORCE_LAYOUT at -1 for published builds.
     - ESP32-C3 only. Classic ESP32 lives in github.com/bgarick/esp32-word-clock-classic.
+
+  v13 changes:
+    - Brightness slider is back in the setup page (5-100). Default 15 on EVERY layout (the 16x8 no
+      longer defaults to 75). The saved value is kept across restarts and applied as soon as you Save.
+    - Holding BOOT for about half a second on a running clock opens setup (no unplugging). WiFi and all
+      settings are kept. Any Save closes setup ~3 s later; otherwise it closes by itself after 5 minutes.
+    - While setup is open, and while the clock joins WiFi, the letters W-I-F-I light one at a time.
+      While it waits for the time (NTP), the letters C-L-O-C-K light one at a time.
+      (Replaces the corner / centre-pair animations.)
+    - The setup page is built by runSetupPortal(); it now runs non-blocking so the animation keeps going.
+    - Live preview in setup: dragging the brightness slider changes the clock's brightness right away, and
+      picking a layout in the dropdown shows it on the plate. A sample time is lit while you do this (the real
+      time if the clock has it, otherwise HALF PAST THREE). Nothing is saved until you tap Save; closing setup
+      without a Save puts the saved brightness and layout back.
+    - Default layout is now the 16x8 Crossword (used until a layout is saved).
+    - Joining saved WiFi at boot: scans every channel, takes the strongest copy of the network, and restarts the
+      search every 10 s during the 30 s wait. Each failed join logs its reason in words.
+    - The old "WiFi Network" dropdown is gone (the list at the top of the page does that job). From a BOOT-hold
+      setup, a "Keep current WiFi" checkbox leaves the WiFi alone on Save.
 */
 
 #include <WiFi.h>
@@ -51,10 +70,15 @@
 #include <ArduinoJson.h>
 
 #define NUMPIXELS  144          // buffer size = largest layout
-#define BRIGHTNESS_DEFAULT 15   // layouts 0, 1, 3
-#define BRIGHTNESS_16X8    75   // layout 2 (value used on the 16x8 bench clock)
-#define DEFAULT_LAYOUT 0        // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12 (used until a layout is saved)
+#define BRIGHTNESS_DEFAULT 15   // used until a brightness is saved in setup (same on every layout)
+#define BRIGHT_MIN         5    // setup-page slider range
+#define BRIGHT_MAX         100
+#define PORTAL_TIMEOUT_MS  300000UL   // setup closes by itself after 5 minutes
+#define SAVE_CLOSE_MS      3000UL     // setup closes this long after a Save (lets the browser show "Saved")
+#define BTN_HOLD_MS        500UL      // BOOT must be held this long on a running clock to open setup
+#define DEFAULT_LAYOUT 2        // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12 (used until a layout is saved)
 #define FORCE_LAYOUT   -1      // -1 = use the saved layout; 0..3 = ALWAYS use this layout and ignore the saved one (one board, one plate)
+#define WIFI_RETRY_MS       10000   // during the wait for saved WiFi, restart the network search this often
 #define STORED_WIFI_WAIT_MS 30000   // how long to wait for saved WiFi at boot before opening the setup portal (was 12000; too short on a weak signal)
 #define C3_TX_POWER    WIFI_POWER_8_5dBm   // C3 Super Mini radio cap. Lower = setup AP visible; higher = better range. Try 11dBm / 13dBm if WiFi is weak.
 #define DELAYVAL   30000
@@ -85,7 +109,7 @@ time_t nowEpoch;
 int    year_, month_, day_, hour_, minute_;
 int    r = 0, g = 0, b = 0;
 uint16_t frameLitCount = 0;
-uint8_t brightness = BRIGHTNESS_DEFAULT;   // set per layout in applyLayout(); not user-configurable
+uint8_t brightness = BRIGHTNESS_DEFAULT;   // loaded from saved settings ("bright"); set with the slider in setup
 
 // ============================================================================
 // Fade / transition state  (added 2026-10-03: smooth staggered time changes)
@@ -114,6 +138,8 @@ SpecialDay special[NUM_SPECIAL];
 // the struct breaks every prototype that mentions SpecialDay.
 int g_activeSpecial = -1;   // index of today's special day, or -1
 
+static uint8_t clampBrightness(int v) { return (uint8_t)(v < BRIGHT_MIN ? BRIGHT_MIN : (v > BRIGHT_MAX ? BRIGHT_MAX : v)); }
+
 // Layout: 0 = Vertical, 1 = Horizontal, 2 = Crossword 16x8, 3 = Square 12x12
 uint8_t layout = DEFAULT_LAYOUT;
 uint16_t activeLeds = NUMPIXELS;   // LEDs on the strip for the active layout (144, or 128 for layout 2)
@@ -124,7 +150,7 @@ uint16_t activeLeds = NUMPIXELS;   // LEDs on the strip for the active layout (1
 // to Pages and the firmware .bin to the latest Release; the clock updates when
 // the published version is higher than the one baked in here.
 // ============================================================================
-#define FW_VERSION 12
+#define FW_VERSION 13
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/" FW_BIN_NAME;
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
@@ -187,8 +213,7 @@ int V_twelveHour[] = { 45,42,37,34,29,26 };
 int V_noon[]       = { 51,44,43,36 };
 int V_midnight[]   = { 33,30,25,22,17,14,9,6 };
 int V_oclock[]     = { 55,48,47,40,39,32 };
-int V_wifiAnim[]   = { 5,2,31,30 };
-int V_noAnim[]     = { 51,44 };
+int V_wifiAnim[]   = { 77,74,31,30 };   // W (row 16) I (TIL, row 17) F I (FIVE, row 28)
 
 // ============================================================================
 // Word index arrays — Horizontal (layout == 1)
@@ -237,7 +262,6 @@ int H_noon[]       = { 48,47,40,39 };
 int H_midnight[]   = { 34,29,26,21,18,13,10,5 };
 int H_oclock[]     = { 52,51,44,43,36,35 };
 int H_wifiAnim[]   = { 78,73,28,29 };
-int H_noAnim[]     = { 48,47 };
 
 // ============================================================================
 // Layout 2 -- CROSSWORD 16x8 (128 LEDs): two 8x8 panels, panel 0 below panel 1.
@@ -274,7 +298,7 @@ int C_thirteen[8], C_fourteen[8], C_fifteen[7], C_sixteen[7], C_seventeen[9], C_
 int C_quarter[7], C_twenty[6], C_half_[4], C_past[4], C_of[2], C_to_[2];
 int C_oneHour[3], C_twoHour[3], C_threeHour[5], C_fourHour[4], C_fiveHour[4], C_sixHour[3], C_sevenHour[5], C_eightHour[5];
 int C_nineHour[4], C_tenHour[3], C_elevenHour[6], C_twelveHour[6], C_noon[4], C_midnight[8], C_oclock[6];
-int C_wifiAnim[4], C_noAnim[2];
+int C_wifiAnim[4];
 
 // n letters starting at (r,c), stepping (dr,dc): across = (0,1), down = (1,0)
 static void cwPut(int* d, int r, int c, int dr, int dc, int n) {
@@ -333,10 +357,9 @@ void buildCrosswordWords() {
   cwPut(C_sevenHour, 14, 0, 0, 1, 5);
   cwPut(C_noon,      14, 4, 0, 1, 4);
   cwPut(C_midnight,  15, 0, 0, 1, 8);
-  // ---- startup / portal animation: spin around the corners; centre pair for "no WiFi" ----
-  C_wifiAnim[0] = cwLedIndex(0, 0);  C_wifiAnim[1] = cwLedIndex(0, 7);
-  C_wifiAnim[2] = cwLedIndex(15, 7); C_wifiAnim[3] = cwLedIndex(15, 0);
-  C_noAnim[0]   = cwLedIndex(7, 3);  C_noAnim[1]   = cwLedIndex(8, 3);
+  // ---- WIFI letters, lit one at a time: W (row 1, col 0)  I (row 3, col 5)  F (row 9, col 0)  I (row 15, col 4) ----
+  C_wifiAnim[0] = cwLedIndex(1, 0);  C_wifiAnim[1] = cwLedIndex(3, 5);
+  C_wifiAnim[2] = cwLedIndex(9, 0);  C_wifiAnim[3] = cwLedIndex(15, 4);
   Serial.println("[LAYOUT] 16x8 plate word map built.");
 }
 
@@ -386,7 +409,6 @@ int S_noon[]        = { 49, 50, 51, 0 };
 int S_midnight[]    = { 104, 105, 106, 107, 56, 57, 58, 59 };
 int S_oclock[]      = { 119, 118, 117, 116, 71, 70 };
 int S_wifiAnim[]    = { 142, 137, 124, 79 };
-int S_noAnim[]      = { 49, 50 };
 
 // ============================================================================
 // Active pointers — set by applyLayout()
@@ -435,7 +457,7 @@ int* noon;
 int* midnight;
 int* oclock;
 int* wifiAnim;
-int* noAnim;
+int* clockAnim;   // CLOCK = the last five letters of OCLOCK (set in applyLayout)
 
 // Word lengths — same for both layouts
 const int LEN_oneMin     = 3;
@@ -482,14 +504,13 @@ const int LEN_noon       = 4;
 const int LEN_midnight   = 8;
 const int LEN_oclock     = 6;
 const int LEN_wifiAnim   = 4;
-const int LEN_noAnim     = 2;
+const int LEN_clockAnim  = 5;
 
 static const char* layoutName(uint8_t l) {
   return l == 0 ? "Vertical" : (l == 1 ? "Horizontal" : (l == 2 ? "Crossword 16x8" : "Square 12x12"));
 }
 
 void applyLayout() {
-  brightness = (layout == 2) ? BRIGHTNESS_16X8 : BRIGHTNESS_DEFAULT;
   activeLeds = (layout == 2) ? CW_LEDS : NUMPIXELS;
   if (layout == 2) {
     buildCrosswordWords();
@@ -506,7 +527,7 @@ void applyLayout() {
     sixHour = C_sixHour; sevenHour = C_sevenHour; eightHour = C_eightHour;
     nineHour = C_nineHour; tenHour = C_tenHour; elevenHour = C_elevenHour;
     twelveHour = C_twelveHour; noon = C_noon; midnight = C_midnight;
-    oclock = C_oclock; wifiAnim = C_wifiAnim; noAnim = C_noAnim;
+    oclock = C_oclock; wifiAnim = C_wifiAnim;
     after = nullptr; til = nullptr; before = nullptr;   // this plate has no AFTER / TIL / BEFORE
   } else if (layout == 3) {
     oneMin = S_oneMin; twoMin = S_twoMin; threeMin = S_threeMin;
@@ -523,7 +544,6 @@ void applyLayout() {
     eightHour = S_eightHour; nineHour = S_nineHour; tenHour = S_tenHour;
     elevenHour = S_elevenHour; twelveHour = S_twelveHour; noon = S_noon;
     midnight = S_midnight; oclock = S_oclock; wifiAnim = S_wifiAnim;
-    noAnim = S_noAnim;
     fifteen = nullptr; before = nullptr;   // square has QUARTER only and no BEFORE
   } else if (layout == 0) {
     oneMin     = V_oneMin;     twoMin     = V_twoMin;
@@ -548,7 +568,6 @@ void applyLayout() {
     elevenHour = V_elevenHour; twelveHour = V_twelveHour;
     noon       = V_noon;       midnight   = V_midnight;
     oclock     = V_oclock;     wifiAnim   = V_wifiAnim;
-    noAnim     = V_noAnim;
   } else {
     oneMin     = H_oneMin;     twoMin     = H_twoMin;
     threeMin   = H_threeMin;   fourMin    = H_fourMin;
@@ -572,8 +591,8 @@ void applyLayout() {
     elevenHour = H_elevenHour; twelveHour = H_twelveHour;
     noon       = H_noon;       midnight   = H_midnight;
     oclock     = H_oclock;     wifiAnim   = H_wifiAnim;
-    noAnim     = H_noAnim;
   }
+  clockAnim = oclock + 1;   // C-L-O-C-K (skip the leading O of OCLOCK)
   if (pixels.numPixels() != activeLeds) pixels.updateLength(activeLeds);
   Serial.printf("[LAYOUT] Active layout: %s (%u LEDs)\n", layoutName(layout), (unsigned)activeLeds);
 }
@@ -582,10 +601,9 @@ void applyTimezone(const char* tz);
 void ensureTimeSynced();
 void setColor(int order);
 void showTime(int hour, int minute);
+static void drawPreviewFrame(int hour, int minute);
 void setLEDs(int a[], int len);
 uint8_t gamma8(uint8_t v);
-void animateIndices(const int* seq, int len, uint16_t hold_ms);
-void runPortalAnimation(WiFiManager& wm);
 void applyPowerLimitAndShow();
 void transitionToTime(int h, int m);
 void checkForUpdate(const char* reason);
@@ -674,6 +692,24 @@ bool isThanksgiving(){
 // ============================================================================
 // Wi-Fi event handler
 // ============================================================================
+static const char* wifiReasonText(uint8_t r) {
+  switch (r) {
+    case 2:   return "auth expired";
+    case 8:   return "left the network";
+    case 15:  return "wrong password (handshake timeout)";
+    case 200: return "lost the router's signal (beacon timeout)";
+    case 201: return "network not found";
+    case 202: return "authentication failed";
+    case 203: return "association failed";
+    case 204: return "handshake timeout";
+    case 205: return "connection failed";
+    case 210: return "network found but its security does not match";
+    case 211: return "network found but its security is below the allowed minimum";
+    case 212: return "network found but its signal is too weak";
+    default:  return "other";
+  }
+}
+
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_START:
@@ -691,151 +727,91 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       WIFI_OK = false;
       WIFI_LAST_REASON = info.wifi_sta_disconnected.reason;
-      Serial.printf("[WIFI] Disconnected -- reason=%u. Auto-reconnect will retry.\n",
-        (unsigned)WIFI_LAST_REASON);
+      Serial.printf("[WIFI] Disconnected -- reason=%u (%s). Auto-reconnect will retry.\n",
+        (unsigned)WIFI_LAST_REASON, wifiReasonText(WIFI_LAST_REASON));
       break;
     default: break;
   }
 }
 
 // ============================================================================
-// setup()
+// Letter animations. WIFI lights while the clock joins WiFi and while setup is open; CLOCK lights while it
+// waits for the time. One letter at a time (step_ms each), then one dark step, repeating.
+// Non-blocking: call it often; it only touches the strip when the step changes.
 // ============================================================================
-void setup() {
-  Serial.begin(115200);
-  delay(100);
+static const int* g_letterSeq   = nullptr;
+static uint32_t   g_letterPhase = 0xFFFFFFFFUL;
+static uint32_t   g_letterStart = 0;
 
-  Serial.println("\n\n========================================");
-  Serial.println("       Word Clock -- " BOARD_NAME " Boot");
-  Serial.println("========================================");
-  Serial.printf("  LED_PIN  : GPIO%d (default)\n", DEFAULT_LED_PIN);
-  Serial.printf("  BTN_PIN  : GPIO%d\n", BTN_PIN);
-  Serial.printf("  NeoPixels: %d\n", NUMPIXELS);
-  Serial.println("----------------------------------------");
-
-  pinMode(BTN_PIN, INPUT_PULLUP);
-  bool forcePortalAtBoot = false;
-
-  Serial.println("[BOOT] Waiting 2s -- press BOOT to open portal, hold 5s to clear credentials...");
-  bool buttonPressed = false;
-  uint32_t phase1Start = millis();
-  while (millis() - phase1Start < 2000) {
-    if (digitalRead(BTN_PIN) == LOW) { buttonPressed = true; break; }
-    delay(10);
+static void drawLetterFrame(const int* seq, int len, uint16_t step_ms) {
+  if (seq != g_letterSeq) { g_letterSeq = seq; g_letterStart = millis(); g_letterPhase = 0xFFFFFFFFUL; }   // always start at the first letter
+  uint32_t phase = ((uint32_t)(millis() - g_letterStart) / step_ms) % (uint32_t)(len + 1);
+  if (phase == g_letterPhase) return;
+  g_letterPhase = phase;
+  pixels.clear();
+  if ((int)phase < len) {
+    int idx = seq[phase];
+    if (idx >= 0 && idx < (int)activeLeds) pixels.setPixelColor(idx, pixels.Color(255, 255, 255));
   }
+  pixels.show();
+}
 
-  if (!buttonPressed) {
-    Serial.println("[BOOT] No button press -- normal boot.");
-  } else {
-    Serial.println("[BOOT] Button pressed! Hold for 5s to clear credentials, release for portal only...");
-    uint32_t holdStart = millis();
-    bool longHold = true;
-    while (millis() - holdStart < 5000) {
-      if (digitalRead(BTN_PIN) == HIGH) { longHold = false; break; }
-      delay(10);
-    }
-    if (longHold) {
-      Serial.println("[BOOT] Long hold detected -- clearing Wi-Fi credentials...");
-      WiFi.mode(WIFI_STA);
-      delay(50);
-      WiFi.disconnect(true, true);
-      esp_wifi_restore();
-      delay(200);
-      WiFi.mode(WIFI_OFF);
-      delay(100);
-      Serial.println("[BOOT] Credentials cleared. Portal will open.");
-      forcePortalAtBoot = true;
-    } else {
-      Serial.println("[BOOT] Short press -- opening portal without credential erase.");
-      forcePortalAtBoot = true;
-    }
-  }
-
-  // --- Load saved preferences ---
-  Serial.println("[PREFS] Loading saved settings...");
-  prefs.begin("settings", true);
-  String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-  layout    = prefs.getUChar("layout",    DEFAULT_LAYOUT);
-  loadSpecialDays();
-  prefs.end();
-
-  if (layout > 3) layout = DEFAULT_LAYOUT;
-  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
-
-  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
-    storedTZ.c_str(), special[0].month, special[0].day, layoutName(layout));
-
-  applyLayout();
-
-  // --- NeoPixel init ---
-  Serial.printf("[LED] Initializing NeoPixels on GPIO%d...\n", ledPin);
-  pixels.setPin(ledPin);
-  pixels.begin();
-  pixels.setBrightness(brightness);
+static void letterAnimEnd() {
+  g_letterSeq = nullptr; g_letterPhase = 0xFFFFFFFFUL;
   pixels.clear();
   pixels.show();
-  Serial.println("[LED] NeoPixels ready.");
+  memset(live, 0, sizeof(live));   // the time display fades up from black afterwards
+}
 
-  randomSeed(esp_random());
+// ============================================================================
+// Setup portal ("Word Clock Setup")
+//   keepWifi = true : the clock is already online (BOOT hold) -- keep the WiFi link, just add the setup AP.
+//   keepWifi = false: first boot / no usable WiFi -- start from a clean radio.
+// Runs until: the clock joins WiFi through the page, a Save was made (closes SAVE_CLOSE_MS later while
+// online), or PORTAL_TIMEOUT_MS passes. The page runs in the background so the WIFI animation keeps going.
+// Returns true if the clock is connected to WiFi when setup closes.
+// ============================================================================
+static volatile uint32_t g_portalSavedAt = 0;   // millis() of the last Save (0 = none yet)
+// Live brightness preview: the setup page's slider calls /bright?v=N while it is dragged.
+#define PREVIEW_HOLD_MS 8000UL                  // after the last slider move, go back to the WIFI letters
+static volatile uint32_t g_previewAt     = 0;   // millis() of the last /bright call (0 = none)
+static volatile int      g_previewBright = 0;
+static volatile int      g_previewLayout = -1;  // layout picked in the dropdown (-1 = none); previewed, not saved
+static uint8_t           g_layoutSaved   = 0;   // the layout to keep when setup closes (changes on Save)
 
-// --- Wi-Fi stack ---
-  Serial.println("[WIFI] Configuring Wi-Fi stack...");
-  delay(100);
-  WiFi.mode(WIFI_OFF);
-  delay(200);
-  WiFi.mode(WIFI_STA);
-  delay(500);
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-  WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
-#endif
-  WiFi.persistent(true);
-  WiFi.setAutoReconnect(true);
-  WiFi.setSleep(false);
-  WiFi.setHostname("WordClock");
-  WiFi.onEvent(onWiFiEvent);
-  Serial.println("[WIFI] Stack configured. Hostname: WordClock");
+bool runSetupPortal(bool keepWifi) {
+  g_portalSavedAt = 0;
+  drawLetterFrame(wifiAnim, LEN_wifiAnim, 400);   // instant feedback: the scan below takes a few seconds
 
-  delay(500);
+  prefs.begin("settings", true);
+  String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
+  prefs.end();
 
-  delay(500);  // <-- add this; gives radio time to settle after credential wipe
-
-
-  // --- Network scan ---
-  Serial.println("[WIFI] Scanning for networks...");
-  int n = WiFi.scanNetworks(false, true);
-  Serial.printf("[WIFI] Scan complete -- %d network(s) found:\n", n);
-
-  ssidHtml  = "<label for='ssid_select'>WiFi Network:</label>";
-  ssidHtml += "<select id='ssid_select' style='width:100%;padding:6px;'>";
-  if (n <= 0) {
-    Serial.println("[WIFI]   (none found)");
-    ssidHtml += "<option value=''>No networks found</option>";
-  } else {
-    for (int i = 0; i < n; ++i) {
-      String ssid = WiFi.SSID(i);
-      int rssi    = WiFi.RSSI(i);
-      bool enc    = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-      Serial.printf("[WIFI]   %2d: %-32s  RSSI: %4d  %s\n",
-        i+1, ssid.c_str(), rssi, enc ? "secured" : "open");
-      ssidHtml += "<option value='" + ssid + "'>" + ssid + " (" + String(rssi);
-      ssidHtml += enc ? ", locked" : ", open";
-      ssidHtml += ")</option>";
-    }
+  // --- "Keep current WiFi" (BOOT-hold setup only) ---
+  // WiFiManager's own page already lists the networks (tap one to choose it). From a BOOT hold the clock is
+  // online, so offer a checkbox that leaves the WiFi alone: an empty network name makes WiFiManager skip it.
+  ssidHtml = "";
+  if (keepWifi) {
+    ssidHtml += F("<label><input type='checkbox' id='keep_wifi' checked> Keep current WiFi (uncheck to change it)</label>");
+    ssidHtml += R"rawliteral(
+      <script>
+        document.addEventListener('DOMContentLoaded', function(){
+          var chk = document.getElementById('keep_wifi');
+          var s   = document.getElementsByName('s')[0];
+          if(!chk || !s) return;
+          var f = chk.form || document.forms[0];
+          if(s.value){ chk.checked = false; }                 // a network was already filled in
+          var untick = function(){ chk.checked = false; };
+          document.addEventListener('click', function(e){      // tapping a network in the list picks it
+            if(e.target && e.target.closest && e.target.closest('a')){ untick(); }
+          });
+          s.addEventListener('input', untick);
+          if(f){ f.addEventListener('submit', function(){ if(chk.checked){ s.value=''; } }); }
+        });
+      </script>
+      <br/><br/>
+    )rawliteral";
   }
-  ssidHtml += "</select>";
-  ssidHtml += R"rawliteral(
-    <script>
-      document.addEventListener('DOMContentLoaded', function(){
-        var sel = document.getElementById('ssid_select');
-        var s   = document.getElementsByName('s')[0];
-        if(s && sel){ s.value = sel.value; }
-        if(sel){
-          sel.addEventListener('change', function(){ if(s){ s.value = this.value; } });
-        }
-      });
-    </script>
-    <br/><br/>
-  )rawliteral";
 
   // --- WiFiManager ---
   Serial.println("[WIFI] Configuring WiFiManager...");
@@ -969,7 +945,7 @@ void setup() {
           for(var i=0;i<sel.options.length;i++){
             if(sel.options[i].value===hid.value){ sel.selectedIndex=i; break; }
           }
-          sel.addEventListener('change', function(){ hid.value=this.value; });
+          sel.addEventListener('change', function(){ hid.value=this.value; try{ fetch('/layout?v=' + this.value); }catch(e){} });   // live preview
         }
       });
     </script>
@@ -978,6 +954,40 @@ void setup() {
   WiFiManagerParameter layoutHTMLParam(layoutHtml.c_str());
   wm.addParameter(&layoutHTMLParam);
 
+
+  // Brightness slider (hidden field carries the value; the range input is just the control)
+  WiFiManagerParameter brightParam("bright", "", String(brightness).c_str(), 4, "type='hidden'");
+  wm.addParameter(&brightParam);
+
+  String brHtml;
+  brHtml.reserve(900);
+  brHtml += F("<label>Brightness: <b id='br_val'></b></label><br/>");
+  brHtml += "<input type='range' id='br_sel' min='" + String(BRIGHT_MIN) + "' max='" + String(BRIGHT_MAX) + "' step='1' style='width:100%'>";
+  brHtml += F(R"rawliteral(
+    <script>
+      document.addEventListener('DOMContentLoaded', function(){
+        var sel = document.getElementById('br_sel');
+        var hid = document.getElementsByName('bright')[0];
+        var out = document.getElementById('br_val');
+        if(sel && hid){
+          sel.value = hid.value;
+          if(out){ out.textContent = sel.value; }
+          var last = 0, tmr = null;
+          var send = function(v){ try{ fetch('/bright?v=' + v); }catch(e){} };
+          sel.addEventListener('input', function(){
+            var v = this.value;
+            hid.value = v; if(out){ out.textContent = v; }
+            var n = Date.now();
+            if(n - last > 200){ last = n; send(v); }        // live preview while dragging
+            clearTimeout(tmr); tmr = setTimeout(function(){ send(v); }, 250);   // always send the final value
+          });
+        }
+      });
+    </script>
+    <br/><br/>
+  )rawliteral");
+  WiFiManagerParameter brightHTMLParam(brHtml.c_str());
+  wm.addParameter(&brightHTMLParam);
 
   // Firmware version label (visible in the config portal)
   String fwHtml = String("<p style='text-align:center;color:#888;margin-top:8px'>Firmware v") + FW_VERSION + " (" BOARD_NAME ")</p>";
@@ -1001,9 +1011,16 @@ void setup() {
       prefs.putString(key.c_str(), serializeSpecial(tmp));
     }
     prefs.putUChar("layout",     (uint8_t)lTmp);
+    int bTmp = atoi(brightParam.getValue());
+    uint8_t newBright = clampBrightness(bTmp > 0 ? bTmp : (int)brightness);
+    prefs.putUChar("bright",     newBright);
     prefs.end();
 
-    layout    = (uint8_t)lTmp;
+    layout     = (uint8_t)lTmp;
+    g_layoutSaved = layout;
+    g_previewLayout = -1;
+    brightness = newBright;
+    pixels.setBrightness(brightness);   // takes effect immediately
     applyLayout();
 
     Serial.println("[PORTAL] Settings saved:");
@@ -1011,24 +1028,271 @@ void setup() {
     for (int i = 0; i < NUM_SPECIAL; i++)
       Serial.printf("[PORTAL]   SpecialDay %d: %02u/%02u mode=%u\n", i+1, special[i].month, special[i].day, special[i].mode);
     Serial.printf("[PORTAL]   Layout  : %s\n", layoutName(layout));
+    Serial.printf("[PORTAL]   Bright  : %u\n", (unsigned)brightness);
+    if (wm.server) {
+      Serial.printf("[PORTAL]   WiFi    : name='%s'  password length=%u\n",
+        wm.server->arg("s").c_str(), (unsigned)wm.server->arg("p").length());
+    }
+    g_portalSavedAt = millis();
+    if (g_portalSavedAt == 0) g_portalSavedAt = 1;
   });
 
-  wm.setConfigPortalBlocking(true);
-  wm.setConnectTimeout(30);
-  wm.setConfigPortalTimeout(240);
+  // /bright?v=N : preview brightness on the clock while the slider is dragged (nothing is saved)
+  g_previewAt = 0;
+  g_previewLayout = -1;
+  g_previewBright = brightness;
+  g_layoutSaved   = layout;
+  wm.setWebServerCallback([&wm]() {
+    wm.server->on("/layout", HTTP_GET, [&wm]() {
+      int v = wm.server->arg("v").toInt();
+      if (v >= 0 && v <= 3 && FORCE_LAYOUT < 0) g_previewLayout = v;
+      uint32_t now = millis();
+      g_previewAt = now ? now : 1;
+      wm.server->send(200, "text/plain", "ok");
+    });
+    wm.server->on("/bright", HTTP_GET, [&wm]() {
+      g_previewBright = clampBrightness(wm.server->arg("v").toInt());
+      uint32_t now = millis();
+      g_previewAt = now ? now : 1;
+      wm.server->send(200, "text/plain", "ok");
+    });
+  });
 
+  wm.setConfigPortalBlocking(false);
+  wm.setConnectTimeout(30);
+  wm.setConfigPortalTimeout(0);          // PORTAL_TIMEOUT_MS is enforced below
+
+  if (!keepWifi) WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_AP_STA);
+  delay(100);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
+#endif
+  Serial.println("[PORTAL] Opening \"Word Clock Setup\"");
+  wm.startConfigPortal("Word Clock Setup");
+
+  uint32_t t0 = millis();
+  bool previewOn = false;
+  int  previewShown = 0, previewH = 3, previewM = 30;
+  while (wm.getConfigPortalActive()) {
+    wm.process();
+    uint32_t pv = g_previewAt;
+    if (pv && (uint32_t)(millis() - pv) < PREVIEW_HOLD_MS) {
+      int want = g_previewBright;
+      int pl   = g_previewLayout;
+      bool layoutChanged = (pl >= 0 && pl != (int)layout);
+      if (!previewOn || want != previewShown || layoutChanged) {
+        if (layoutChanged) {   // show the sample time with the layout picked in the dropdown (not saved yet)
+          pixels.clear(); pixels.show();
+          layout = (uint8_t)pl;
+          applyLayout();
+        }
+        if (!previewOn) {   // pick the sample time once per preview: the real time if known, else 3:30 (HALF PAST THREE)
+          struct tm ti;
+          if (getLocalTime(&ti, 0)) { previewH = ti.tm_hour; previewM = ti.tm_min; }
+          else                      { previewH = 3;          previewM = 30; }
+        }
+        previewOn = true; previewShown = want;
+        pixels.setBrightness((uint8_t)want);
+        drawPreviewFrame(previewH, previewM);
+      }
+    } else {
+      if (previewOn) { previewOn = false; pixels.setBrightness(brightness); letterAnimEnd(); }
+      drawLetterFrame(wifiAnim, LEN_wifiAnim, 400);
+    }
+    uint32_t saved = g_portalSavedAt;
+    if (saved && WiFi.status() == WL_CONNECTED && (uint32_t)(millis() - saved) >= SAVE_CLOSE_MS) {
+      Serial.println("[PORTAL] Saved -- closing setup.");
+      break;
+    }
+    if ((uint32_t)(millis() - t0) >= PORTAL_TIMEOUT_MS) {
+      Serial.println("[PORTAL] Timed out -- closing setup.");
+      break;
+    }
+    delay(5);
+  }
+  if (wm.getConfigPortalActive()) wm.stopConfigPortal();
+  pixels.setBrightness(brightness);   // undo any slider preview (brightness = the saved value)
+  if (layout != g_layoutSaved) {      // undo any layout preview that wasn't saved
+    pixels.clear(); pixels.show();
+    layout = g_layoutSaved;
+    applyLayout();
+  }
+  letterAnimEnd();
+
+  if (keepWifi) {
+    WiFi.mode(WIFI_STA);   // drop the setup AP
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    WiFi.setTxPower(C3_TX_POWER);
+#endif
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// ============================================================================
+// BOOT button on a running clock: hold ~0.5 s to open setup. WiFi and settings are kept.
+// Returns true if setup was opened (so loop() redraws the time).
+// ============================================================================
+static bool serviceBootButton() {
+  static uint32_t downAt = 0;
+  static bool latched = false;            // set once triggered; cleared when the button is released
+  if (digitalRead(BTN_PIN) == HIGH) { downAt = 0; latched = false; return false; }
+  if (latched) return false;
+  if (downAt == 0) { downAt = millis(); return false; }
+  if ((uint32_t)(millis() - downAt) < BTN_HOLD_MS) return false;
+  latched = true;
+
+  Serial.println("[BTN] BOOT held -- opening setup (WiFi and settings are kept).");
+  bool online = runSetupPortal(true);
+
+  prefs.begin("settings", true);
+  String timezone = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
+  layout     = prefs.getUChar("layout", layout);
+  brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
+  loadSpecialDays();
+  prefs.end();
+  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
+  applyLayout();
+  pixels.setBrightness(brightness);
+  Serial.printf("[BTN] Applied TZ: %s  SpecialDay1: %02u/%02u  Layout: %s  Brightness: %u\n",
+    timezone.c_str(), special[0].month, special[0].day, layoutName(layout), (unsigned)brightness);
+  applyTimezone(timezone.c_str());
+
+  if (!online) {
+    Serial.println("[BTN] WiFi lost while in setup -- restarting.");
+    delay(500);
+    ESP.restart();
+  }
+  return true;
+}
+
+// ============================================================================
+// setup()
+// ============================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  Serial.println("\n\n========================================");
+  Serial.println("       Word Clock -- " BOARD_NAME " Boot");
+  Serial.println("========================================");
+  Serial.printf("  LED_PIN  : GPIO%d (default)\n", DEFAULT_LED_PIN);
+  Serial.printf("  BTN_PIN  : GPIO%d\n", BTN_PIN);
+  Serial.printf("  NeoPixels: %d\n", NUMPIXELS);
+  Serial.println("----------------------------------------");
+
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  bool forcePortalAtBoot = false;
+
+  Serial.println("[BOOT] Waiting 2s -- press BOOT to open portal, hold 5s to clear credentials...");
+  bool buttonPressed = false;
+  uint32_t phase1Start = millis();
+  while (millis() - phase1Start < 2000) {
+    if (digitalRead(BTN_PIN) == LOW) { buttonPressed = true; break; }
+    delay(10);
+  }
+
+  if (!buttonPressed) {
+    Serial.println("[BOOT] No button press -- normal boot.");
+  } else {
+    Serial.println("[BOOT] Button pressed! Hold for 5s to clear credentials, release for portal only...");
+    uint32_t holdStart = millis();
+    bool longHold = true;
+    while (millis() - holdStart < 5000) {
+      if (digitalRead(BTN_PIN) == HIGH) { longHold = false; break; }
+      delay(10);
+    }
+    if (longHold) {
+      Serial.println("[BOOT] Long hold detected -- clearing Wi-Fi credentials...");
+      WiFi.mode(WIFI_STA);
+      delay(50);
+      WiFi.disconnect(true, true);
+      esp_wifi_restore();
+      delay(200);
+      WiFi.mode(WIFI_OFF);
+      delay(100);
+      Serial.println("[BOOT] Credentials cleared. Portal will open.");
+      forcePortalAtBoot = true;
+    } else {
+      Serial.println("[BOOT] Short press -- opening portal without credential erase.");
+      forcePortalAtBoot = true;
+    }
+  }
+
+  // --- Load saved preferences ---
+  Serial.println("[PREFS] Loading saved settings...");
+  prefs.begin("settings", true);
+  String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
+  layout    = prefs.getUChar("layout",    DEFAULT_LAYOUT);
+  brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
+  loadSpecialDays();
+  prefs.end();
+
+  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
+
+  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
+    storedTZ.c_str(), special[0].month, special[0].day, layoutName(layout));
+
+  applyLayout();
+
+  // --- NeoPixel init ---
+  Serial.printf("[LED] Initializing NeoPixels on GPIO%d...\n", ledPin);
+  pixels.setPin(ledPin);
+  pixels.begin();
+  pixels.setBrightness(brightness);
+  pixels.clear();
+  pixels.show();
+  Serial.println("[LED] NeoPixels ready.");
+
+  randomSeed(esp_random());
+
+// --- Wi-Fi stack ---
+  Serial.println("[WIFI] Configuring Wi-Fi stack...");
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(200);
+  WiFi.mode(WIFI_STA);
+  delay(500);
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+  WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
+#endif
+  WiFi.persistent(true);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);          // look on every channel, not just the first match: finds weak networks
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);      // if the name appears more than once, take the strongest
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+  WiFi.setHostname("WordClock");
+  WiFi.onEvent(onWiFiEvent);
+  Serial.println("[WIFI] Stack configured. Hostname: WordClock");
+
+  delay(500);
+
+  delay(500);  // <-- add this; gives radio time to settle after credential wipe
+
+
+  // --- Join WiFi: saved credentials first, then the setup portal ---
   bool connected = false;
 
   if (!forcePortalAtBoot) {
     Serial.println("[WIFI] Trying stored credentials...");
     WiFi.begin();
-    unsigned long t0 = millis();
-    int dots = 0;
+    uint32_t t0 = millis(), lastDot = 0, lastTry = millis();
     while ((millis() - t0) < STORED_WIFI_WAIT_MS && WiFi.status() != WL_CONNECTED) {
-      if (dots++ % 10 == 0) Serial.print(".");
-      delay(100);
+      drawLetterFrame(wifiAnim, LEN_wifiAnim, 400);      // WIFI, one letter at a time
+      if (millis() - lastDot >= 1000) { lastDot = millis(); Serial.print("."); }
+      if (millis() - lastTry >= WIFI_RETRY_MS) {          // not joined yet: start a fresh search for the network
+        lastTry = millis();
+        Serial.printf("\n[WIFI] Not joined after %u s -- searching again.\n", (unsigned)((millis() - t0) / 1000));
+        WiFi.disconnect(false, false);
+        delay(100);
+        WiFi.begin();
+      }
+      delay(20);
     }
     Serial.println();
+    letterAnimEnd();
     connected = (WiFi.status() == WL_CONNECTED);
     if (connected) {
       Serial.printf("[WIFI] Connected! SSID: %s  IP: %s\n",
@@ -1040,28 +1304,15 @@ void setup() {
 
   if (!connected) {
     Serial.println("[WIFI] Opening captive portal: \"Word Clock Setup\"");
-    WiFi.disconnect(true, false);
-    WiFi.mode(WIFI_AP_STA);
-    delay(100);
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-    WiFi.setTxPower(C3_TX_POWER);   // C3 Super Mini: full power can hide the setup AP
-#endif
-    if (!wm.autoConnect("Word Clock Setup")) {
-      Serial.println("[WIFI] Portal timed out without connection. Rebooting in 3s...");
-      delay(3000);
-      ESP.restart();
-    }
-    connected = (WiFi.status() == WL_CONNECTED);
+    connected = runSetupPortal(false);
     if (connected) {
       Serial.printf("[WIFI] Connected via portal! SSID: %s  IP: %s\n",
         WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+    } else {
+      Serial.println("[WIFI] Portal closed without a connection. Rebooting in 3s...");
+      delay(3000);
+      ESP.restart();
     }
-  }
-
-  if (!connected) {
-    Serial.println("[WIFI] Still not connected -- forcing restart.");
-    delay(1000);
-    ESP.restart();
   }
 
   WIFI_OK = true;
@@ -1071,6 +1322,7 @@ void setup() {
   prefs.begin("settings", true);
   String timezone = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
   layout    = prefs.getUChar("layout",    layout);
+  brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
   loadSpecialDays();
   prefs.end();
 
@@ -1078,8 +1330,9 @@ void setup() {
   if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
 
   applyLayout();
+  pixels.setBrightness(brightness);
 
-  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s  Brightness: %u (fixed)\n",
+  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s  Brightness: %u\n",
     timezone.c_str(), special[0].month, special[0].day,
     layoutName(layout), brightness);
 
@@ -1127,35 +1380,7 @@ void loop() {
     }
   }
 
-  static uint32_t lastBtnCheck = 0;
-  uint32_t nowMs = millis();
-  if (nowMs - lastBtnCheck > 100) {
-    lastBtnCheck = nowMs;
-    if (digitalRead(BTN_PIN) == LOW) {
-      Serial.println("[BTN] Button pressed -- reopening portal.");
-      WiFiManager wm;
-      wm.setConfigPortalBlocking(true);
-      if (!wm.autoConnect("Word Clock Setup")) {
-        Serial.println("[BTN] Portal closed without connection -- keeping prior Wi-Fi.");
-      } else {
-        Serial.println("[BTN] Portal saved new settings.");
-        prefs.begin("settings", true);
-        String timezone = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-        layout    = prefs.getUChar("layout",    layout);
-        loadSpecialDays();
-        prefs.end();
-        if (layout > 3) layout = DEFAULT_LAYOUT;
-        if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
-        applyLayout();
-        Serial.printf("[BTN] Applied TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
-          timezone.c_str(), special[0].month, special[0].day,
-          layoutName(layout));
-        applyTimezone(timezone.c_str());
-        ensureTimeSynced();
-        lastMinute = -1;
-      }
-    }
-  }
+  if (serviceBootButton()) lastMinute = -1;   // BOOT hold opened setup: redraw the time afterwards
 
   nowEpoch = time(nullptr);
   localtime_r(&nowEpoch, &tm_now);
@@ -1210,7 +1435,11 @@ void loop() {
       frameLitCount, pixels.getBrightness());
   }
 
-  delay(200);
+  // ~200 ms between ticks, polling the BOOT button every 20 ms so a press is never missed
+  for (int k = 0; k < 10; k++) {
+    if (serviceBootButton()) { lastMinute = -1; break; }
+    delay(20);
+  }
 }
 
 // ============================================================================
@@ -1227,25 +1456,24 @@ void applyTimezone(const char* tz) {
 void ensureTimeSynced() {
   Serial.println("[NTP] Waiting for time sync...");
   struct tm ti{};
-  int attempts = 0;
-  while (!getLocalTime(&ti, 1000) && attempts < 20) {
-    Serial.printf("[NTP] Attempt %d/20...\n", attempts + 1);
-    int idx = wifiAnim[attempts % LEN_wifiAnim];
-    pixels.clear();
-    if (idx >= 0 && idx < NUMPIXELS) {
-      pixels.setPixelColor(idx, pixels.Color(40, 40, 40));
+  bool synced = false;
+  uint32_t t0 = millis(), lastLog = 0;
+  while ((uint32_t)(millis() - t0) < 20000UL) {
+    if (getLocalTime(&ti, 0)) { synced = true; break; }
+    drawLetterFrame(clockAnim, LEN_clockAnim, 350);       // CLOCK, one letter at a time
+    if (millis() - lastLog >= 1000) {
+      lastLog = millis();
+      Serial.printf("[NTP] Waiting... %lus\n", (unsigned long)((millis() - t0) / 1000));
     }
-    pixels.show();
-    attempts++;
+    delay(20);
   }
-  pixels.clear();
-  pixels.show();
-  if (attempts < 20) {
-    Serial.printf("[NTP] Synced after %d attempt(s): %02d:%02d:%02d on %02d/%02d/%04d\n",
-      attempts + 1, ti.tm_hour, ti.tm_min, ti.tm_sec,
+  letterAnimEnd();
+  if (synced) {
+    Serial.printf("[NTP] Synced after %lu s: %02d:%02d:%02d on %02d/%02d/%04d\n",
+      (unsigned long)((millis() - t0) / 1000), ti.tm_hour, ti.tm_min, ti.tm_sec,
       ti.tm_mon + 1, ti.tm_mday, ti.tm_year + 1900);
   } else {
-    Serial.println("[NTP] WARNING: Sync timed out after 20 attempts. Time may be wrong.");
+    Serial.println("[NTP] WARNING: Sync timed out after 20 s. Time may be wrong.");
   }
 }
 
@@ -1515,6 +1743,16 @@ void transitionToTime(int h, int m) {
   if (pixels.getBrightness()!=original) pixels.setBrightness(original);
 }
 
+// Setup-page brightness preview: show a time on the plate right now, no fades.
+static void drawPreviewFrame(int hour, int minute) {
+  memset(tgt, 0, sizeof(tgt));
+  memset(grp, 0, sizeof(grp));
+  frameLitCount = 0;
+  showTime(hour, minute);
+  memcpy(live, tgt, sizeof(live));
+  pushLive();
+}
+
 // ============================================================================
 // OTA: read version.json; if a newer version is published, download & flash.
 // ============================================================================
@@ -1551,28 +1789,4 @@ void checkForUpdate(const char* reason) {
   else if (ret == HTTP_UPDATE_NO_UPDATES)
     Serial.println("[OTA] No update at firmware URL.");
   // HTTP_UPDATE_OK reboots automatically.
-}
-
-// ============================================================================
-// Portal animation
-// ============================================================================
-void animateIndices(const int* seq, int len, uint16_t hold_ms) {
-  for (int i=0; i<len; ++i) {
-    pixels.clear();
-    int idx=seq[i];
-    if (idx>=0&&idx<NUMPIXELS) pixels.setPixelColor(idx, pixels.Color(40,40,40));
-    pixels.show();
-    delay(hold_ms);
-  }
-}
-
-void runPortalAnimation(WiFiManager& wm) {
-  while (wm.getConfigPortalActive()) {
-    wm.process();
-    animateIndices(wifiAnim, LEN_wifiAnim, 180);
-    wm.process();
-    animateIndices(noAnim,   LEN_noAnim,   220);
-  }
-  pixels.clear();
-  pixels.show();
 }
