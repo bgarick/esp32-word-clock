@@ -51,6 +51,18 @@
       search every 10 s during the 30 s wait. Each failed join logs its reason in words.
     - The old "WiFi Network" dropdown is gone (the list at the top of the page does that job). From a BOOT-hold
       setup, a "Keep current WiFi" checkbox leaves the WiFi alone on Save.
+
+  v14 changes:
+    - Square (layout 3, three 4x12 panels) now matches the real wiring, measured on a built clock: each panel
+      starts at its TOP right, runs across in rows of 4 and zigzags down; right panel first, then middle,
+      then left. (v12/v13 assumed each panel started at the bottom, so words lit on the mirrored row.)
+      Verified on hardware.
+    - NEW layout 4 "Square Original": the same 12x12 letter plate wired as ONE board that snakes row by row
+      (LED 0 under the X of SIX, runs along the bottom row, up one row, back, and so on). Reuses the Square
+      word map and converts each LED number through SQ_ORIG_MAP when it is drawn.
+    - At power-on the version number is shown in words for about 1 s, before anything else (FOURTEEN).
+      1-29 are spelled like minutes; larger numbers show digit by digit, with the O of O'CLOCK as zero.
+      It runs inside the existing 2 s BOOT-button window, so boot is no slower and BOOT still works.
 */
 
 #include <WiFi.h>
@@ -76,8 +88,8 @@
 #define PORTAL_TIMEOUT_MS  300000UL   // setup closes by itself after 5 minutes
 #define SAVE_CLOSE_MS      3000UL     // setup closes this long after a Save (lets the browser show "Saved")
 #define BTN_HOLD_MS        500UL      // BOOT must be held this long on a running clock to open setup
-#define DEFAULT_LAYOUT 2        // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12 (used until a layout is saved)
-#define FORCE_LAYOUT   -1      // -1 = use the saved layout; 0..3 = ALWAYS use this layout and ignore the saved one (one board, one plate)
+#define DEFAULT_LAYOUT 2        // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square, 4 Square Original (used until a layout is saved)
+#define FORCE_LAYOUT   -1      // -1 = use the saved layout; 0..4 = ALWAYS use this layout and ignore the saved one (one board, one plate)
 #define WIFI_RETRY_MS       10000   // during the wait for saved WiFi, restart the network search this often
 #define STORED_WIFI_WAIT_MS 30000   // how long to wait for saved WiFi at boot before opening the setup portal (was 12000; too short on a weak signal)
 #define C3_TX_POWER    WIFI_POWER_8_5dBm   // C3 Super Mini radio cap. Lower = setup AP visible; higher = better range. Try 11dBm / 13dBm if WiFi is weak.
@@ -140,7 +152,7 @@ int g_activeSpecial = -1;   // index of today's special day, or -1
 
 static uint8_t clampBrightness(int v) { return (uint8_t)(v < BRIGHT_MIN ? BRIGHT_MIN : (v > BRIGHT_MAX ? BRIGHT_MAX : v)); }
 
-// Layout: 0 = Vertical, 1 = Horizontal, 2 = Crossword 16x8, 3 = Square 12x12
+// Layout: 0 = Vertical, 1 = Horizontal, 2 = Crossword 16x8, 3 = Square (3 panels), 4 = Square Original (one board, row snake)
 uint8_t layout = DEFAULT_LAYOUT;
 uint16_t activeLeds = NUMPIXELS;   // LEDs on the strip for the active layout (144, or 128 for layout 2)
 
@@ -150,7 +162,7 @@ uint16_t activeLeds = NUMPIXELS;   // LEDs on the strip for the active layout (1
 // to Pages and the firmware .bin to the latest Release; the clock updates when
 // the published version is higher than the one baked in here.
 // ============================================================================
-#define FW_VERSION 13
+#define FW_VERSION 14
 const char* OTA_VERSION_URL  = "https://bgarick.github.io/esp32-word-clock/version.json";
 const char* OTA_FIRMWARE_URL = "https://github.com/bgarick/esp32-word-clock/releases/latest/download/" FW_BIN_NAME;
 int  otaLastCheckYday = -1;   // day-of-year of last daily check (avoid repeats)
@@ -367,48 +379,48 @@ void buildCrosswordWords() {
 // Layout 3 -- SQUARE 12x12 (144 LEDs). Word map taken from WC_ESP32Mini_square_v7.
 // This plate has QUARTER only (no FIFTEEN) and no BEFORE; it does have AFTER, PAST, TIL, OF, TO.
 // ============================================================================
-int S_oneMin[]      = { 76, 31, 30 };
-int S_twoMin[]      = { 76, 83, 84 };
-int S_threeMin[]    = { 84, 39, 38, 37, 36 };
-int S_fourMin[]     = { 120, 121, 122, 123 };
-int S_fiveMin[]     = { 124, 79, 78, 77 };
-int S_sixMin[]      = { 87, 86, 85 };
-int S_sevenMin[]    = { 128, 129, 130, 131, 80 };
-int S_eightMin[]    = { 136, 137, 138, 139, 88 };
-int S_nineMin[]     = { 135, 134, 133, 132 };
-int S_tenMin[]      = { 143, 136, 135 };
-int S_elevenMin[]   = { 93, 92, 47, 46, 45, 44 };
-int S_twelveMin[]   = { 82, 83, 32, 33, 34, 35 };
-int S_thirteen[]    = { 72, 73, 74, 75, 24, 25, 26, 27 };
-int S_fourteen[]    = { 120, 121, 122, 123, 24, 25, 26, 27 };
-int S_quarter[]     = { 89, 90, 91, 40, 41, 42, 43 };
-int S_sixteen[]     = { 87, 86, 85, 24, 25, 26, 27 };
-int S_seventeen[]   = { 128, 129, 130, 131, 80, 24, 25, 26, 27 };
-int S_eighteen[]    = { 136, 137, 138, 139, 24, 25, 26, 27 };
-int S_nineteen[]    = { 135, 134, 133, 132, 24, 25, 26, 27 };
-int S_twenty[]      = { 143, 142, 141, 140, 95, 94 };
-int S_half_[]       = { 127, 126, 125, 124 };
-int S_after[]       = { 113, 114, 115, 64, 65 };
-int S_past[]        = { 69, 68, 23, 22 };
-int S_til[]         = { 22, 21, 20 };
-int S_of[]          = { 119, 112 };
-int S_to_[]         = { 29, 28 };
-int S_oneHour[]     = { 103, 102, 101 };
-int S_twoHour[]     = { 59, 52, 51 };
-int S_threeHour[]   = { 59, 8, 9, 10, 11 };
-int S_fourHour[]    = { 63, 62, 61, 60 };
-int S_fiveHour[]    = { 111, 110, 109, 108 };
-int S_sixHour[]     = { 1, 2, 3 };
-int S_sevenHour[]   = { 96, 97, 98, 99, 48 };
-int S_eightHour[]   = { 101, 100, 55, 54, 53 };
-int S_nineHour[]    = { 12, 13, 14, 15 };
-int S_tenHour[]     = { 115, 108, 107 };
-int S_elevenHour[]  = { 66, 67, 16, 17, 18, 19 };
-int S_twelveHour[]  = { 53, 52, 7, 6, 5, 4 };
-int S_noon[]        = { 49, 50, 51, 0 };
-int S_midnight[]    = { 104, 105, 106, 107, 56, 57, 58, 59 };
-int S_oclock[]      = { 119, 118, 117, 116, 71, 70 };
-int S_wifiAnim[]    = { 142, 137, 124, 79 };
+int S_oneMin[]      = { 64, 19, 18 };
+int S_twoMin[]      = { 64, 63, 56 };
+int S_threeMin[]    = { 56, 11, 10, 9, 8 };
+int S_fourMin[]     = { 116, 117, 118, 119 };
+int S_fiveMin[]     = { 112, 67, 66, 65 };
+int S_sixMin[]      = { 59, 58, 57 };
+int S_sevenMin[]    = { 108, 109, 110, 111, 60 };
+int S_eightMin[]    = { 100, 101, 102, 103, 52 };
+int S_nineMin[]     = { 107, 106, 105, 104 };
+int S_tenMin[]      = { 99, 100, 107 };
+int S_elevenMin[]   = { 49, 48, 3, 2, 1, 0 };
+int S_twelveMin[]   = { 62, 63, 12, 13, 14, 15 };
+int S_thirteen[]    = { 68, 69, 70, 71, 20, 21, 22, 23 };
+int S_fourteen[]    = { 116, 117, 118, 119, 20, 21, 22, 23 };
+int S_quarter[]     = { 53, 54, 55, 4, 5, 6, 7 };
+int S_sixteen[]     = { 59, 58, 57, 20, 21, 22, 23 };
+int S_seventeen[]   = { 108, 109, 110, 111, 60, 20, 21, 22, 23 };
+int S_eighteen[]    = { 100, 101, 102, 103, 20, 21, 22, 23 };
+int S_nineteen[]    = { 107, 106, 105, 104, 20, 21, 22, 23 };
+int S_twenty[]      = { 99, 98, 97, 96, 51, 50 };
+int S_half_[]       = { 115, 114, 113, 112 };
+int S_after[]       = { 125, 126, 127, 76, 77 };
+int S_past[]        = { 73, 72, 27, 26 };
+int S_til[]         = { 26, 25, 24 };
+int S_of[]          = { 123, 124 };
+int S_to_[]         = { 17, 16 };
+int S_oneHour[]     = { 139, 138, 137 };
+int S_twoHour[]     = { 87, 88, 95 };
+int S_threeHour[]   = { 87, 36, 37, 38, 39 };
+int S_fourHour[]    = { 83, 82, 81, 80 };
+int S_fiveHour[]    = { 131, 130, 129, 128 };
+int S_sixHour[]     = { 45, 46, 47 };
+int S_sevenHour[]   = { 140, 141, 142, 143, 92 };
+int S_eightHour[]   = { 137, 136, 91, 90, 89 };
+int S_nineHour[]    = { 32, 33, 34, 35 };
+int S_tenHour[]     = { 127, 128, 135 };
+int S_elevenHour[]  = { 78, 79, 28, 29, 30, 31 };
+int S_twelveHour[]  = { 89, 88, 43, 42, 41, 40 };
+int S_noon[]        = { 93, 94, 95, 44 };
+int S_midnight[]    = { 132, 133, 134, 135, 84, 85, 86, 87 };
+int S_oclock[]      = { 123, 122, 121, 120, 75, 74 };
+int S_wifiAnim[]    = { 98, 101, 112, 67 };
 
 // ============================================================================
 // Active pointers — set by applyLayout()
@@ -506,12 +518,36 @@ const int LEN_oclock     = 6;
 const int LEN_wifiAnim   = 4;
 const int LEN_clockAnim  = 5;
 
+// "Square Original" (layout 4): same letters and word map as Square (layout 3), but the LEDs are one
+// board snaking row by row from the bottom: LED 0 is under the X of SIX, then along the bottom row, up one
+// row, back, and so on. SQ_ORIG_MAP[n] = the LED to light for the Square word map's LED number n.
+// If a real plate comes out mirrored on every row, flip C (C <-> 11-C) when regenerating the table.
+static const uint8_t SQ_ORIG_MAP[144] = {
+  143, 142, 141, 140, 123, 122, 121, 120, 119, 118, 117, 116,
+   99,  98,  97,  96,  95,  94,  93,  92,  75,  74,  73,  72,
+   71,  70,  69,  68,  51,  50,  49,  48,  47,  46,  45,  44,
+   27,  26,  25,  24,  23,  22,  21,  20,   3,   2,   1,   0,
+  139, 138, 137, 136, 127, 126, 125, 124, 115, 114, 113, 112,
+  103, 102, 101, 100,  91,  90,  89,  88,  79,  78,  77,  76,
+   67,  66,  65,  64,  55,  54,  53,  52,  43,  42,  41,  40,
+   31,  30,  29,  28,  19,  18,  17,  16,   7,   6,   5,   4,
+  135, 134, 133, 132, 131, 130, 129, 128, 111, 110, 109, 108,
+  107, 106, 105, 104,  87,  86,  85,  84,  83,  82,  81,  80,
+   63,  62,  61,  60,  59,  58,  57,  56,  39,  38,  37,  36,
+   35,  34,  33,  32,  15,  14,  13,  12,  11,  10,   9,   8,
+};
+static bool g_sqOrig = false;                       // true while layout 4 is active
+static inline int physLed(int i) {                  // word-map LED number -> physical LED on the strip
+  return (g_sqOrig && i >= 0 && i < 144) ? (int)SQ_ORIG_MAP[i] : i;
+}
+
 static const char* layoutName(uint8_t l) {
-  return l == 0 ? "Vertical" : (l == 1 ? "Horizontal" : (l == 2 ? "Crossword 16x8" : "Square 12x12"));
+  return l == 0 ? "Vertical" : (l == 1 ? "Horizontal" : (l == 2 ? "Crossword 16x8" : (l == 3 ? "Square" : "Square Original")));
 }
 
 void applyLayout() {
   activeLeds = (layout == 2) ? CW_LEDS : NUMPIXELS;
+  g_sqOrig = (layout == 4);
   if (layout == 2) {
     buildCrosswordWords();
     oneMin = C_oneMin; twoMin = C_twoMin; threeMin = C_threeMin;
@@ -529,7 +565,7 @@ void applyLayout() {
     twelveHour = C_twelveHour; noon = C_noon; midnight = C_midnight;
     oclock = C_oclock; wifiAnim = C_wifiAnim;
     after = nullptr; til = nullptr; before = nullptr;   // this plate has no AFTER / TIL / BEFORE
-  } else if (layout == 3) {
+  } else if (layout == 3 || layout == 4) {
     oneMin = S_oneMin; twoMin = S_twoMin; threeMin = S_threeMin;
     fourMin = S_fourMin; fiveMin = S_fiveMin; sixMin = S_sixMin;
     sevenMin = S_sevenMin; eightMin = S_eightMin; nineMin = S_nineMin;
@@ -751,7 +787,7 @@ static void drawLetterFrame(const int* seq, int len, uint16_t step_ms) {
   pixels.clear();
   if ((int)phase < len) {
     int idx = seq[phase];
-    if (idx >= 0 && idx < (int)activeLeds) pixels.setPixelColor(idx, pixels.Color(255, 255, 255));
+    if (idx >= 0 && idx < (int)activeLeds) pixels.setPixelColor(physLed(idx), pixels.Color(255, 255, 255));
   }
   pixels.show();
 }
@@ -761,6 +797,66 @@ static void letterAnimEnd() {
   pixels.clear();
   pixels.show();
   memset(live, 0, sizeof(live));   // the time display fades up from black afterwards
+}
+
+// ============================================================================
+// Boot: show the firmware version in words (works for any FW_VERSION, any layout)
+//   1-29  -> one frame, the way the minute is spelled: FOURTEEN, TWENTY-THREE ...
+//            (15 on a layout with no FIFTEEN word falls through to digits; QUARTER would be wrong)
+//   other -> digit by digit, ~1 s each: ONE ... OH ... FIVE for 105. Zero = the O of O'CLOCK.
+// White at the saved brightness. Returns true if BOOT was pressed while it showed (so the
+// 2-second setup-button window still sees the press).
+// ============================================================================
+static void bootLight(const int* a, int len) {
+  if (!a) return;
+  for (int i = 0; i < len; i++)
+    if (a[i] >= 0 && a[i] < (int)activeLeds) pixels.setPixelColor(physLed(a[i]), pixels.Color(255, 255, 255));
+}
+
+static bool bootNumber(int n) {   // lights n (1-29) as one word group; false if this layout can't
+  int* w[20] = { nullptr, oneMin, twoMin, threeMin, fourMin, fiveMin, sixMin, sevenMin, eightMin,
+                 nineMin, tenMin, elevenMin, twelveMin, thirteen, fourteen, fifteen, sixteen,
+                 seventeen, eighteen, nineteen };
+  const int len[20] = { 0, LEN_oneMin, LEN_twoMin, LEN_threeMin, LEN_fourMin, LEN_fiveMin, LEN_sixMin,
+                 LEN_sevenMin, LEN_eightMin, LEN_nineMin, LEN_tenMin, LEN_elevenMin, LEN_twelveMin,
+                 LEN_thirteen, LEN_fourteen, LEN_fifteen, LEN_sixteen, LEN_seventeen, LEN_eighteen,
+                 LEN_nineteen };
+  if (n >= 1 && n <= 19) { if (!w[n]) return false; bootLight(w[n], len[n]); return true; }
+  if (n == 20)           { bootLight(twenty, LEN_twenty); return true; }
+  if (n >= 21 && n <= 29){ bootLight(twenty, LEN_twenty); bootLight(w[n - 20], len[n - 20]); return true; }
+  return false;
+}
+
+static bool bootWait(uint32_t ms) {   // waits ms, watching the BOOT button
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < ms) { if (digitalRead(BTN_PIN) == LOW) return true; delay(10); }
+  return false;
+}
+
+static bool showVersionAtBoot() {
+  const uint32_t SHOW_MS = 1000, GAP_MS = 200;
+  bool pressed = false;
+  pixels.clear();
+  if (bootNumber(FW_VERSION)) {
+    Serial.printf("[BOOT] Showing version %d in words\n", FW_VERSION);
+    pixels.show();
+    pressed = bootWait(SHOW_MS);
+  } else {
+    Serial.printf("[BOOT] Showing version %d digit by digit\n", FW_VERSION);
+    char digits[12];
+    snprintf(digits, sizeof(digits), "%d", (int)FW_VERSION);
+    for (const char* d = digits; *d && !pressed; d++) {
+      pixels.clear();
+      if (*d == '0') bootLight(oclock, 1);   // "O"
+      else           bootNumber(*d - '0');
+      pixels.show();
+      pressed = bootWait(SHOW_MS);
+      if (!pressed && d[1]) { pixels.clear(); pixels.show(); pressed = bootWait(GAP_MS); }   // gap so 1-1 reads as two
+    }
+  }
+  pixels.clear();
+  pixels.show();
+  return pressed;
 }
 
 // ============================================================================
@@ -934,7 +1030,8 @@ bool runSetupPortal(bool keepWifi) {
   layoutHtml += F("<option value='0'>Vertical (4x36)</option>");
   layoutHtml += F("<option value='1'>Horizontal (36x4)</option>");
   layoutHtml += F("<option value='2'>Crossword (16x8, 128 LEDs)</option>");
-  layoutHtml += F("<option value='3'>Square (12x12)</option>");
+  layoutHtml += F("<option value='3'>Square</option>");
+  layoutHtml += F("<option value='4'>Square Original</option>");
   layoutHtml += F("</select>");
   layoutHtml += F(R"rawliteral(
     <script>
@@ -999,7 +1096,7 @@ bool runSetupPortal(bool keepWifi) {
     const char* tz = tzParam.getValue();
 
     int lTmp = atoi(layoutParam.getValue());
-    if (lTmp < 0 || lTmp > 3) lTmp = 0;   // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square 12x12
+    if (lTmp < 0 || lTmp > 4) lTmp = 0;   // 0 Vertical, 1 Horizontal, 2 Crossword 16x8, 3 Square, 4 Square Original
 
     prefs.begin("settings", false);
     prefs.putString("tz",        tz);
@@ -1045,7 +1142,7 @@ bool runSetupPortal(bool keepWifi) {
   wm.setWebServerCallback([&wm]() {
     wm.server->on("/layout", HTTP_GET, [&wm]() {
       int v = wm.server->arg("v").toInt();
-      if (v >= 0 && v <= 3 && FORCE_LAYOUT < 0) g_previewLayout = v;
+      if (v >= 0 && v <= 4 && FORCE_LAYOUT < 0) g_previewLayout = v;
       uint32_t now = millis();
       g_previewAt = now ? now : 1;
       wm.server->send(200, "text/plain", "ok");
@@ -1151,7 +1248,7 @@ static bool serviceBootButton() {
   brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
   loadSpecialDays();
   prefs.end();
-  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (layout > 4) layout = DEFAULT_LAYOUT;
   if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
   applyLayout();
   pixels.setBrightness(brightness);
@@ -1185,10 +1282,37 @@ void setup() {
   pinMode(BTN_PIN, INPUT_PULLUP);
   bool forcePortalAtBoot = false;
 
+  // --- Load saved preferences ---
+  Serial.println("[PREFS] Loading saved settings...");
+  prefs.begin("settings", true);
+  String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
+  layout    = prefs.getUChar("layout",    DEFAULT_LAYOUT);
+  brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
+  loadSpecialDays();
+  prefs.end();
+
+  if (layout > 4) layout = DEFAULT_LAYOUT;
+  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
+
+  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
+    storedTZ.c_str(), special[0].month, special[0].day, layoutName(layout));
+
+  applyLayout();
+
+  // --- NeoPixel init ---
+  Serial.printf("[LED] Initializing NeoPixels on GPIO%d...\n", ledPin);
+  pixels.setPin(ledPin);
+  pixels.begin();
+  pixels.setBrightness(brightness);
+  pixels.clear();
+  pixels.show();
+  Serial.println("[LED] NeoPixels ready.");
+
+  // --- Version in words: the first thing on the display. It runs inside the 2 s button window. ---
   Serial.println("[BOOT] Waiting 2s -- press BOOT to open portal, hold 5s to clear credentials...");
-  bool buttonPressed = false;
   uint32_t phase1Start = millis();
-  while (millis() - phase1Start < 2000) {
+  bool buttonPressed = showVersionAtBoot();
+  while (!buttonPressed && millis() - phase1Start < 2000) {
     if (digitalRead(BTN_PIN) == LOW) { buttonPressed = true; break; }
     delay(10);
   }
@@ -1220,31 +1344,6 @@ void setup() {
     }
   }
 
-  // --- Load saved preferences ---
-  Serial.println("[PREFS] Loading saved settings...");
-  prefs.begin("settings", true);
-  String storedTZ = prefs.getString("tz", "EST5EDT,M3.2.0/2,M11.1.0/2");
-  layout    = prefs.getUChar("layout",    DEFAULT_LAYOUT);
-  brightness = clampBrightness(prefs.getUChar("bright", BRIGHTNESS_DEFAULT));
-  loadSpecialDays();
-  prefs.end();
-
-  if (layout > 3) layout = DEFAULT_LAYOUT;
-  if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
-
-  Serial.printf("[PREFS] TZ: %s  SpecialDay1: %02u/%02u  Layout: %s\n",
-    storedTZ.c_str(), special[0].month, special[0].day, layoutName(layout));
-
-  applyLayout();
-
-  // --- NeoPixel init ---
-  Serial.printf("[LED] Initializing NeoPixels on GPIO%d...\n", ledPin);
-  pixels.setPin(ledPin);
-  pixels.begin();
-  pixels.setBrightness(brightness);
-  pixels.clear();
-  pixels.show();
-  Serial.println("[LED] NeoPixels ready.");
 
   randomSeed(esp_random());
 
@@ -1326,7 +1425,7 @@ void setup() {
   loadSpecialDays();
   prefs.end();
 
-  if (layout > 3) layout = DEFAULT_LAYOUT;
+  if (layout > 4) layout = DEFAULT_LAYOUT;
   if (FORCE_LAYOUT >= 0) layout = FORCE_LAYOUT;
 
   applyLayout();
@@ -1673,7 +1772,7 @@ static bool mOut[NUMPIXELS], mConn[NUMPIXELS], mMin[NUMPIXELS], mHour[NUMPIXELS]
 
 static inline void pushLive() {
   for (int i=0;i<NUMPIXELS;i++)
-    pixels.setPixelColor(i, pixels.Color(live[i][0], live[i][1], live[i][2]));
+    pixels.setPixelColor(physLed(i), pixels.Color(live[i][0], live[i][1], live[i][2]));
   pixels.show();
 }
 
