@@ -139,6 +139,7 @@ Verify every word lights up in the right position on the physical panels before 
 ### Arduino IDE Board Settings
 - Board: **ESP32C3 Dev Module**
 - USB CDC On Boot: **Enabled** (required for Serial monitor)
+- Erase All Flash Before Sketch Upload: **Disabled** (otherwise every USB upload wipes the saved WiFi and settings)
 
 ### Libraries Required
 - `WiFiManager` (tzapu)
@@ -155,13 +156,15 @@ Verify every word lights up in the right position on the physical panels before 
 
 ## First-Time Setup
 
+At every power-up the clock first shows its firmware version in words for about a second (FOURTEEN for v14).
+
 On first power-up the clock broadcasts a Wi-Fi network called **Word Clock Setup**.
 
 1. Connect your phone to **Word Clock Setup** (no password) — see **clock_photos/WiFi_Config.png**
 2. The setup portal opens automatically — or go to `192.168.4.1`
 3. Select your Wi-Fi network and enter password
 4. Choose your **timezone** (US only: Eastern, Central, Mountain, Pacific, Alaska, Hawaii)
-5. Choose **layout** (Vertical, Horizontal, Crossword 16x8 or Square 12x12 — must match your physical build). The clock shows it on the plate as you pick, so you can see right away whether the words read correctly.
+5. Choose **layout** (Vertical, Horizontal, Crossword 16x8, Square (three 4x12 panels) or Square Original (one 12x12 board) — must match your physical build). The clock shows it on the plate as you pick, so you can see right away whether the words read correctly.
 6. Set your **birthday month/day** for rainbow mode on that date
 7. Save — clock restarts and displays correct time within 30 seconds
 
